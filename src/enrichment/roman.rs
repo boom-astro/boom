@@ -12,8 +12,6 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
 
-/// A single Roman difference-image photometry point, as stored in the aux
-/// collection (both `prv_candidates` and `fp_hists` share this shape).
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RomanPhotometry {
@@ -25,9 +23,6 @@ pub struct RomanPhotometry {
     pub flux: Option<f64>, // in nJy
     #[serde(rename = "psfFluxErr")]
     pub flux_err: f64, // in nJy
-    /// `band` is nullable in the RAPID schema, so it can be absent on a stored
-    /// point. Such a point can't be placed on a lightcurve, so it is dropped
-    /// rather than failing the whole batch's deserialization.
     #[serde(default)]
     pub band: Option<Band>,
     pub ra: Option<f64>,
@@ -36,17 +31,17 @@ pub struct RomanPhotometry {
 }
 
 impl RomanPhotometry {
-    pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
-        match (self.snr_psf, self.magpsf, self.sigmapsf, self.band.clone()) {
-            (Some(snr), Some(mag), Some(sig), Some(band)) => match min_snr {
-                Some(thresh) if snr.abs() < thresh => None,
-                _ => Some(PhotometryMag {
-                    time: self.jd,
-                    mag,
-                    mag_err: sig,
-                    band,
-                }),
-            },
+    fn to_positive_mag(&self) -> Option<PhotometryMag> {
+        if self.flux.is_some_and(|flux| flux < 0.0) {
+            return None;
+        }
+        match (self.magpsf, self.sigmapsf, self.band.clone()) {
+            (Some(mag), Some(mag_err), Some(band)) => Some(PhotometryMag {
+                time: self.jd,
+                mag,
+                mag_err,
+                band,
+            }),
             _ => None,
         }
     }
@@ -86,8 +81,6 @@ pub fn create_roman_alert_pipeline() -> Vec<Document> {
     ]
 }
 
-/// Roman alert structure used to deserialize alerts from the database, used by
-/// the enrichment worker to compute features (and, later, ML scores).
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct RomanAlertForEnrichment {
     #[serde(rename = "_id")]
@@ -104,12 +97,11 @@ pub struct RomanAlertForEnrichment {
     pub cross_matches: Option<std::collections::HashMap<String, Vec<serde_json::Value>>>,
 }
 
-/// Roman alert properties computed during enrichment and inserted back into the
-/// alert document.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct RomanAlertProperties {
-    /// The source is associated with a known (or candidate) solar-system object.
+    /// Matches a known solar-system object, or RAPID flags it as a moving-object candidate.
     pub rock: bool,
+    /// Detections at this position span more than 0.01 day (about 15 minutes).
     pub stationary: bool,
     pub photstats: PerBandProperties,
 }
@@ -182,8 +174,6 @@ impl EnrichmentWorker for RomanEnrichmentWorker {
 
         let now = flare::Time::now().to_jd();
 
-        // we keep it very simple for now, let's run on 1 alert at a time
-        // we will move to batch processing later
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         for alert in alerts {
@@ -224,21 +214,13 @@ impl RomanEnrichmentWorker {
         let is_rock = !alert.ss_matches.is_empty()
             || alert.candidate.dia_source.is_ss_candidate == Some(true);
 
-        let prv_candidates: Vec<PhotometryMag> = alert
+        let mut lightcurve: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
+            .chain(&alert.fp_hists)
             .filter(|p| p.jd <= alert.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(None))
+            .filter_map(RomanPhotometry::to_positive_mag)
             .collect();
-        let fp_hists: Vec<PhotometryMag> = alert
-            .fp_hists
-            .iter()
-            .filter(|p| p.jd <= alert.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
-            .collect();
-
-        // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
-        let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);

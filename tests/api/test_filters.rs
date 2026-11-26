@@ -160,6 +160,49 @@ mod tests {
         cleanup_test_filter(&database, &filter_id).await;
     }
 
+    /// Test DELETE /filters/{id}
+    #[actix_rt::test]
+    async fn test_delete_filter() {
+        let (filter_id, token, database) = create_test_filter().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::filters::delete_filter)
+                .service(routes::filters::get_filter),
+        )
+        .await;
+
+        let req = test::TestRequest::delete()
+            .uri(&format!("/filters/{}", filter_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Failed to delete filter: {:?}",
+            read_str_response(resp).await
+        );
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/filters/{}", filter_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Deleting it a second time finds nothing to delete.
+        let req = test::TestRequest::delete()
+            .uri(&format!("/filters/{}", filter_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// Test GET /filters/{id}
     #[actix_rt::test]
     async fn test_get_filter() {
@@ -446,11 +489,13 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let token = create_admin_token(&database).await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
+        let config = AppConfig::from_test_config().unwrap();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(config))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::filters::get_filter_schema),
         )
@@ -478,6 +523,15 @@ mod tests {
         assert!(data["type"] == "record");
         assert!(data["name"] == "ZtfAlertToFilter");
         assert!(data["fields"].is_array());
+        let names: Vec<&str> = data["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str())
+            .collect();
+        for name in ["villar_fit", "sso_history", "cross_matches"] {
+            assert!(names.contains(&name), "ZTF schema has no {name}");
+        }
 
         // LSST schema test
         let req = test::TestRequest::get()

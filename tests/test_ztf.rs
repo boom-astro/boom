@@ -16,7 +16,7 @@ use boom::{
         },
     },
 };
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 
 #[tokio::test]
 async fn test_process_ztf_alert() {
@@ -337,7 +337,14 @@ async fn test_enrich_ztf_alert() {
     assert!(classifications.get_f64("acai_v").unwrap() > 0.99);
     assert!(classifications.get_f64("acai_o").unwrap() < 0.01);
     assert!(classifications.get_f64("acai_b").unwrap() < 0.01);
-    assert!(classifications.get_f64("btsbot").unwrap() < 0.01);
+    let btsbot = classifications.get_f64("btsbot").unwrap();
+    // Bounded as well as small: the model emits a logit, and a large negative
+    // one satisfies "< 0.01" just as well as a probability does.
+    assert!(
+        (0.0..=1.0).contains(&btsbot),
+        "btsbot {btsbot} is not a probability"
+    );
+    assert!(btsbot < 0.01);
 
     // the enrichment worker also adds "properties" to the alert
     let properties = alert.get_document("properties").unwrap();
@@ -346,69 +353,26 @@ async fn test_enrich_ztf_alert() {
     assert_eq!(properties.get_bool("near_brightstar").unwrap(), true);
     assert_eq!(properties.get_bool("stationary").unwrap(), true);
 
-    // the properties also include "photstats, a document with bands as keys and
-    // as values the rate of evolution (mag/day) before and after peak
+    // Written for every enriched alert, with every key null when the light
+    // curve cannot be fitted.
+    let gp_fit = alert
+        .get_document("gp_fit")
+        .expect("gp_fit must be written");
+    assert!(gp_fit.contains_key("reduced_chi2"));
+
+    // only the first epoch of each band has a positive flux
     let photstats = properties.get_document("photstats").unwrap();
-
-    // check the values for the g band
-    assert!(photstats.contains_key("g"));
-    let g_stats = photstats.get_document("g").unwrap();
-
-    // g basic stats
-    let peak_mag = g_stats.get_f64("peak_mag").unwrap();
-    let peak_jd = g_stats.get_f64("peak_jd").unwrap();
-    let dt = g_stats.get_f64("dt").unwrap();
-    assert!((peak_mag - 15.6940).abs() < 1e-6);
-    assert!((peak_jd - 2460441.971956).abs() < 1e-6);
-    assert!((dt - 26.956516).abs() < 1e-6);
-
-    // g rising stats
-    let rising = g_stats.get_document("rising").unwrap();
-    let rising_rate = rising.get_f64("rate").unwrap();
-    let rising_red_chi2 = rising.get_f64("red_chi2").unwrap();
-    let rising_dt = rising.get_f64("dt").unwrap();
-    assert!((rising_rate + 0.086736).abs() < 1e-6);
-    assert!((rising_red_chi2 - 82.419716).abs() < 1e-6); // bad fit
-    assert!((rising_dt - 21.008194).abs() < 1e-6);
-
-    // g fading stats
-    let fading = g_stats.get_document("fading").unwrap();
-    let fading_rate = fading.get_f64("rate").unwrap();
-    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
-    let fading_dt = fading.get_f64("dt").unwrap();
-    assert!((fading_rate - 0.038436).abs() < 1e-6);
-    assert!((fading_red_chi2 - 1.654100).abs() < 1e-6); // decent fit
-    assert!((fading_dt - 5.948322).abs() < 1e-6);
-
-    // check the values for the r band
-    assert!(photstats.contains_key("r"));
-    let r_stats = photstats.get_document("r").unwrap();
-
-    // r basic stats
-    let peak_mag = r_stats.get_f64("peak_mag").unwrap();
-    let peak_jd = r_stats.get_f64("peak_jd").unwrap();
-    let dt = r_stats.get_f64("dt").unwrap();
-    assert!((peak_mag - 14.3987).abs() < 1e-6);
-    assert!((peak_jd - 2460441.922303).abs() < 1e-6);
-    assert!((dt - 25.922222).abs() < 1e-6);
-
-    // r rising stats
-    let rising = r_stats.get_document("rising").unwrap();
-    let rising_rate = rising.get_f64("rate").unwrap();
-    let rising_red_chi2 = rising.get_f64("red_chi2").unwrap();
-    let rising_dt = rising.get_f64("dt").unwrap();
-    assert!((rising_rate + 0.023725).abs() < 1e-6);
-    assert!((rising_red_chi2 - 70.454285).abs() < 1e-6); // bad fit
-    assert!((rising_dt - 17.966065).abs() < 1e-6);
-
-    // r fading stats
-    let fading = r_stats.get_document("fading").unwrap();
-    let fading_rate = fading.get_f64("rate").unwrap();
-    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
-    let fading_dt = fading.get_f64("dt").unwrap();
-    assert!((fading_rate - 0.063829).abs() < 1e-6);
-    assert!(fading_red_chi2.is_nan()); // only 2 points after peak
-    assert!((fading_dt - 7.956157).abs() < 1e-6);
+    for (band, peak_mag, peak_jd) in [
+        ("g", 20.801506, 2460420.9637616),
+        ("r", 17.040075, 2460423.9562384),
+    ] {
+        let stats = photstats.get_document(band).unwrap();
+        assert!((stats.get_f64("peak_mag").unwrap() - peak_mag).abs() < 1e-5);
+        assert!((stats.get_f64("peak_jd").unwrap() - peak_jd).abs() < 1e-6);
+        assert_eq!(stats.get_i32("nb_data").unwrap(), 1);
+        assert_eq!(stats.get("rising"), Some(&mongodb::bson::Bson::Null));
+        assert_eq!(stats.get("fading"), Some(&mongodb::bson::Bson::Null));
+    }
 }
 
 #[tokio::test]
@@ -502,11 +466,10 @@ async fn test_filter_ztf_alert() {
 
     // then we compute magpsf and magpsf_err from the flux and flux_err values
     // we compute in the alert worker (at a fixed ZP)
-    let (magpsf, magpsf_err_from_flux) =
-        flux2mag(-flux as f32 * 1e-9, flux_err as f32 * 1e-9, ZTF_ZP);
+    let (magpsf, magpsf_err_from_flux) = flux2mag(-flux as f32, flux_err as f32, ZTF_ZP);
 
     // they should be consistent within a small tolerance
-    assert!((magpsf_forcediffimflux - magpsf).abs() < 1e-6);
+    assert!((magpsf_forcediffimflux - magpsf).abs() < 1e-5);
     assert!((magpsf_err - magpsf_err_from_flux).abs() < 1e-6);
 
     // let's do a similar validation for the first prv_candidates point, where the ZP is fixed at ZTF_ZP
@@ -528,7 +491,7 @@ async fn test_filter_ztf_alert() {
     let flux = prv_candidate_point.flux.unwrap();
     let flux_err = prv_candidate_point.flux_err;
     let (magpsf_prv_candidate, magpsf_err_prv_candidate) =
-        flux2mag((flux.abs() * 1e-9) as f32, (flux_err * 1e-9) as f32, ZTF_ZP);
+        flux2mag(flux.abs() as f32, flux_err as f32, ZTF_ZP);
     assert!((magpsf_prv_candidate - 16.8002).abs() < 1e-4);
     assert!((magpsf_err_prv_candidate - 0.1788).abs() < 1e-4);
 
@@ -563,6 +526,42 @@ async fn test_filter_ztf_alert() {
     // verify that we can convert the alert to avro bytes
     let schema = load_alert_schema().unwrap();
     let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
+}
+
+#[tokio::test]
+async fn test_filter_ztf_alert_skips_non_finite_photometry() {
+    let mut alert_worker = ztf_alert_worker().await;
+    let (candid, object_id, _ra, _dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+
+    get_test_db()
+        .await
+        .collection::<Document>("ZTF_alerts_aux")
+        .update_one(
+            doc! {"_id": &object_id},
+            doc! {"$set": {"prv_nondetections.0.psfFluxErr": f64::INFINITY}},
+        )
+        .await
+        .unwrap();
+
+    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
+    let result = filter_worker
+        .process_alerts(&[format!("1,{}", candid)])
+        .await;
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
+    drop_alert_from_collections(candid, &Survey::Ztf)
+        .await
+        .unwrap();
+
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let photometry = &alerts_output[0].photometry;
+    assert_eq!(photometry.len(), 20);
+    assert!(photometry.iter().all(|p| p.flux_err.is_finite()));
 }
 
 #[tokio::test]

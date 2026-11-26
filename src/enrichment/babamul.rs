@@ -23,7 +23,7 @@ use tokio::sync::Mutex;
 use tracing::instrument;
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
-const LSST_MIN_RELIABILITY: f32 = 0.0; // TODO: Temporary value; update once an appropriate LSST reliability threshold is determined with the new reliability model
+const LSST_MIN_RELIABILITY: f32 = 0.5;
 const ZTF_MIN_DRB: f32 = 0.2;
 
 #[serdavro]
@@ -276,6 +276,21 @@ impl BabamulLsstAlert {
             return category + "stellar";
         }
 
+        match self.properties.hosted {
+            Some(true) => return category + "hosted",
+            Some(false) => {
+                return if is_in_footprint(
+                    self.candidate.dia_source.ra,
+                    self.candidate.dia_source.dec,
+                ) {
+                    category + "hostless"
+                } else {
+                    category + "unknown"
+                };
+            }
+            None => {}
+        }
+
         // Check if we have LSPSC cross-matches
         let empty_vec = vec![];
         let lspsc_matches = cross_matches.get("LSPSC").unwrap_or(&empty_vec);
@@ -386,6 +401,12 @@ impl BabamulZtfAlert {
         // Already classified as stellar (by the enrichment worker), return that
         if self.properties.star || self.properties.near_brightstar {
             return category + "stellar";
+        }
+
+        match self.properties.hosted {
+            Some(true) => return category + "hosted",
+            Some(false) => return category + "hostless",
+            None => {}
         }
 
         // Check star-galaxy scores (sgscore1, sgscore2, sgscore3) to determine if hosted

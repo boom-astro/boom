@@ -1,0 +1,46 @@
+name: Sync LSST docs
+
+on:
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-lsst-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Copy the field docs of Rubin's alert schema
+        run: python3 scripts/sync_lsst_docs.py
+
+      - name: Open a PR with the updated docs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: auto/sync-lsst-docs
+        run: |
+          if git diff --quiet -- src/alert/lsst.rs; then
+            echo "LSST field docs already match Rubin's alert schema"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Sync LSST field docs with Rubin's alert schema"
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+
+          if [ -n "$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[].number')" ]; then
+            echo "Updated the PR already open from $BRANCH"
+            exit 0
+          fi
+
+          gh pr create --base main --head "$BRANCH" --label skip-throughput \
+            --title "Sync LSST field docs with Rubin's alert schema" \
+            --body "Rubin changed the description of some LSST alert fields. This copies the new text so the filter schema and the API docs show it."

@@ -1,7 +1,8 @@
 use crate::{
     alert::{
-        sanitize_winter_avro, AlertWorker, DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker,
-        RomanAlertWorker, SchemaRegistry, WinterAlertWorker, ZtfAlertWorker,
+        alert_temp_queue_name, sanitize_winter_avro, AlertWorker, AskapAlertWorker,
+        DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker, RomanAlertWorker, SchemaRegistry,
+        WinterAlertWorker, WinterRawAvroAlert, ZtfAlertWorker,
         LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
@@ -47,11 +48,26 @@ pub async fn decam_alert_worker() -> DecamAlertWorker {
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
+pub async fn askap_alert_worker() -> AskapAlertWorker {
+    initialize_survey_indexes(&Survey::Askap, &conf::get_test_db().await)
+        .await
+        .unwrap();
+    AskapAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
 pub async fn roman_alert_worker() -> RomanAlertWorker {
     initialize_survey_indexes(&Survey::Roman, &conf::get_test_db().await)
         .await
         .unwrap();
     RomanAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub fn read_winter_test_alert(path: &str) -> WinterRawAvroAlert {
+    let raw = fs::read(path).unwrap();
+    let fixed = sanitize_winter_avro(&raw).unwrap();
+    let reader = Reader::new(&fixed[..]).unwrap();
+    let value = reader.into_iter().next().unwrap().unwrap();
+    apache_avro::from_value(&value).unwrap()
 }
 
 pub async fn winter_alert_worker() -> WinterAlertWorker {
@@ -118,12 +134,11 @@ pub async fn drop_alert_from_collections(
 const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const ZTF_TEST_PIPELINE_PRV_CANDIDATES: &str = "[{\"$match\": {\"prv_candidates.0\": {\"$exists\": true}, \"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const ASKAP_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.snr\": {\"$gte\": 5.0}, \"candidate.flux_peak\": {\"$gt\": 0.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.flux_now\": {\"$round\": [\"$candidate.flux_peak\", 2]}}}]";
 const WINTER_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte\": 20.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 // DECam stores the difference-image magnitude as `magap` (not `magpsf`) and the
 // CNN real-bogus score as `reliability`.
 const DECAM_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.magap\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magap\", 2]}}}]";
-// Roman does PSF photometry only (no aperture flux yet), and RAPID provides the
-// detection snr directly on the candidate.
 const ROMAN_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.snr_psf\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 27.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
 pub async fn remove_test_filter(
@@ -194,6 +209,8 @@ pub async fn insert_test_filter(
         (Survey::Lsst, _) => LSST_TEST_PIPELINE,
         (Survey::Decam, _) => DECAM_TEST_PIPELINE,
         (Survey::Winter, _) => WINTER_TEST_PIPELINE,
+        (Survey::Askap, _) => ASKAP_TEST_PIPELINE,
+        (Survey::Argus, _) => return Err("ARGUS has no filters yet".into()),
         (Survey::Roman, _) => ROMAN_TEST_PIPELINE,
     };
 
@@ -207,7 +224,9 @@ pub async fn empty_processed_alerts_queue(
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
     let mut con = config.build_redis().await?;
     con.del::<&str, usize>(input_queue_name).await.unwrap();
-    con.del::<&str, usize>("{}_temp").await.unwrap();
+    con.del::<&str, usize>(&alert_temp_queue_name(input_queue_name))
+        .await
+        .unwrap();
     con.del::<&str, usize>(output_queue_name).await.unwrap();
 
     Ok(())
@@ -471,8 +490,9 @@ pub fn randomize_object_id(survey: &Survey) -> String {
             }
             object_id
         }
-        // LSST and Roman objectIds are stringified numeric diaObjectIds.
-        Survey::Lsst | Survey::Roman => format!("{}", rand::rng().random_range(0..i64::MAX)),
+        Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
+        Survey::Askap | Survey::Roman => format!("{}", rng.random_range(0..i64::MAX)),
+        Survey::Argus => uuid::Uuid::new_v4().to_string(),
     }
 }
 
@@ -512,12 +532,14 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
-            Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Roman => {
+            Survey::Argus => panic!("ARGUS test alerts come from alert::argus_mock"),
+            Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap | Survey::Roman => {
                 let payload = match survey {
                     Survey::Ztf => {
                         fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
                     }
                     Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
+                    Survey::Askap => fs::read("tests/data/alerts/askap/alert.avro").unwrap(),
                     Survey::Roman => fs::read("tests/data/alerts/roman/alert.avro").unwrap(),
                     // The upstream WINTER schema has a duplicate field name; sanitize
                     // it so the strict avro Reader can parse the container.
@@ -646,28 +668,22 @@ impl AlertRandomizer {
         }
     }
 
-    /// Rewrite the `diaObjectId` of every `diaSource` in a nullable array field
-    /// (Roman's `prvDiaSources`), so the whole packet refers to one object.
     fn update_nested_dia_object_ids(value: &mut Value, object_id: &str) {
-        let object_id = match object_id.parse::<i64>() {
-            Ok(id) => id,
-            Err(_) => return,
+        let Ok(object_id) = object_id.parse::<i64>() else {
+            return;
         };
         let inner = match value {
             Value::Union(_, boxed) => boxed.as_mut(),
             other => other,
         };
-        let items = match inner {
-            Value::Array(items) => items,
-            _ => return,
+        let Value::Array(items) = inner else {
+            return;
         };
         for item in items.iter_mut() {
             if let Value::Record(fields) = item {
                 for (key, field) in fields.iter_mut() {
                     if key == "diaObjectId" {
-                        // `diaObjectId` is nullable (["null", "long"]) on
-                        // diaSource but a plain long on diaForcedSource, so keep
-                        // whichever shape is already there.
+                        // Nullable on diaSource, a plain long on diaForcedSource.
                         *field = match field {
                             Value::Union(..) => {
                                 Value::Union(1_u32, Box::new(Value::Long(object_id)))
@@ -680,11 +696,9 @@ impl AlertRandomizer {
         }
     }
 
-    /// Rewrite the `diaObjectId` of a nullable `diaObject` record (Roman).
     fn update_dia_object_id(value: &mut Value, object_id: &str) {
-        let object_id = match object_id.parse::<i64>() {
-            Ok(id) => id,
-            Err(_) => return,
+        let Ok(object_id) = object_id.parse::<i64>() else {
+            return;
         };
         let inner = match value {
             Value::Union(_, boxed) => boxed.as_mut(),
@@ -745,7 +759,8 @@ impl AlertRandomizer {
 
     pub async fn get(self) -> (i64, String, f64, f64, Vec<u8>) {
         match self.survey {
-            Survey::Ztf | Survey::Decam | Survey::Winter => {
+            Survey::Argus => panic!("ARGUS test alerts come from alert::argus_mock"),
+            Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap => {
                 // Use the same logic for ZTF/Decam/WINTER, just different objectId
                 // prefix (and lowercase `objectid` key for WINTER).
                 let mut candid = self.candid;
@@ -761,6 +776,9 @@ impl AlertRandomizer {
                             }
                             Survey::Decam => {
                                 fs::read("tests/data/alerts/decam/alert.avro").unwrap()
+                            }
+                            Survey::Askap => {
+                                fs::read("tests/data/alerts/askap/alert.avro").unwrap()
                             }
                             Survey::Winter => {
                                 let raw = fs::read("tests/data/alerts/winter/alert.avro").unwrap();
@@ -827,8 +845,6 @@ impl AlertRandomizer {
                 )
             }
             Survey::Roman => {
-                // Roman packets are Avro object container files (like ZTF/DECam)
-                // but carry an LSST-style diaSourceId/diaSource layout.
                 let mut candid = self.candid;
                 let mut object_id = self.object_id;
                 let mut ra = self.ra;
@@ -849,8 +865,7 @@ impl AlertRandomizer {
                     _ => panic!("Not a record"),
                 };
 
-                for i in 0..record.len() {
-                    let (key, value) = &mut record[i];
+                for (key, value) in record.iter_mut() {
                     match key.as_str() {
                         "diaSourceId" => {
                             if let Some(id) = candid {
@@ -874,11 +889,8 @@ impl AlertRandomizer {
                     }
                 }
 
-                // The triggering diaSource sets the objectId; propagate it to the
-                // rest of the packet so the whole alert is self-consistent.
                 let object_id_value = object_id.clone().expect("objectId should be set");
-                for i in 0..record.len() {
-                    let (key, value) = &mut record[i];
+                for (key, value) in record.iter_mut() {
                     match key.as_str() {
                         "prvDiaSources" | "prvDiaForcedSources" => {
                             Self::update_nested_dia_object_ids(value, &object_id_value)

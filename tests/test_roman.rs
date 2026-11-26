@@ -27,7 +27,6 @@ async fn test_process_roman_alert() {
     assert!(result.is_ok(), "{:?}", result);
     assert_eq!(result.unwrap(), ProcessAlertStatus::Added(candid));
 
-    // Reprocessing the same alert is a no-op, not an error:
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Exists(candid));
 
@@ -46,13 +45,10 @@ async fn test_process_roman_alert() {
     let candidate = alert.get_document("candidate").unwrap();
     assert_eq!(candidate.get_f64("ra").unwrap(), ra);
     assert_eq!(candidate.get_f64("dec").unwrap(), dec);
-    // Roman times are UTC MJD, so jd is a plain offset from midpointMjd
     let jd = candidate.get_f64("jd").unwrap();
     let mjd = candidate.get_f64("midpointMjd").unwrap();
     assert!((jd - (mjd + 2400000.5)).abs() < 1e-9);
-    // the wide filter arrives as W146 and is normalized to F146
     assert_eq!(candidate.get_str("band").unwrap(), "F146");
-    // no solar-system match in the sample packet
     assert!(alert.get_array("ss_matches").unwrap().is_empty());
 
     let cutout_storage = get_test_cutout_storage(&Survey::Roman).await;
@@ -72,10 +68,8 @@ async fn test_process_roman_alert() {
     let aux = aux.unwrap();
     assert_eq!(aux.get_str("_id").unwrap(), &object_id);
     assert_eq!(aux.get_bool("is_sso").unwrap(), false);
-    // 27 previous detections in the packet + the triggering one
     let prv_candidates = aux.get_array("prv_candidates").unwrap();
     assert_eq!(prv_candidates.len(), 28);
-    // no forced photometry in the packet yet
     assert!(aux.get_array("fp_hists").unwrap().is_empty());
 
     drop_alert_from_collections(candid, &Survey::Roman)
@@ -83,8 +77,6 @@ async fn test_process_roman_alert() {
         .unwrap();
 }
 
-/// Exercises the enrichment read path: the aux lookup pipeline, deserializing the
-/// stored lightcurve, and computing the alert properties.
 #[tokio::test]
 async fn test_roman_alert_properties() {
     let mut alert_worker = roman_alert_worker().await;
@@ -108,20 +100,15 @@ async fn test_roman_alert_properties() {
     .unwrap();
     assert_eq!(alerts.len(), 1);
     let alert = &alerts[0];
-    // the whole stored lightcurve is fetched, and no forced photometry exists yet
     assert_eq!(alert.prv_candidates.len(), 28);
     assert!(alert.fp_hists.is_empty());
     assert!(alert.ss_matches.is_empty());
-    // fluxes survive the round trip through Mongo under their packet names
     assert!(alert.prv_candidates.iter().all(|p| p.flux.is_some()));
 
     let properties = enrichment_worker.get_alert_properties(alert).await.unwrap();
     assert_eq!(properties.rock, false);
-    // Properties only use photometry up to the alert epoch (the LSST convention),
-    // and in this packet the triggering source is the object's *first* detection
-    // — `prvDiaSources` holds the 27 later ones — so a single epoch is in scope.
+    // The packet's triggering source is the object's first detection, so only one epoch is in scope.
     assert_eq!(properties.stationary, false);
-    // all photometry is in the wide F146 filter
     assert!(properties.photstats.f146.is_some());
     assert!(properties.photstats.g.is_none());
 
@@ -130,8 +117,6 @@ async fn test_roman_alert_properties() {
         .unwrap();
 }
 
-/// Exercises the enrichment write path. Requires MongoDB 8.0+ (`bulk_write`), like
-/// the other surveys' enrichment workers.
 #[tokio::test]
 async fn test_enrich_roman_alert() {
     let mut alert_worker = roman_alert_worker().await;
@@ -157,7 +142,6 @@ async fn test_enrich_roman_alert() {
 
     let properties = alert.get_document("properties").unwrap();
     assert_eq!(properties.get_bool("rock").unwrap(), false);
-    // see test_roman_alert_properties for why this is not stationary
     assert_eq!(properties.get_bool("stationary").unwrap(), false);
     let photstats = properties.get_document("photstats").unwrap();
     assert!(photstats.get_document("f146").is_ok());
@@ -195,10 +179,8 @@ async fn test_filter_roman_alert() {
     assert_eq!(&alert.object_id, &object_id);
     assert_eq!(alert.survey, Survey::Roman);
 
-    // the full lightcurve is bundled into the outgoing packet
     assert_eq!(alert.photometry.len(), 28);
     assert!(alert.photometry.iter().all(|p| p.band == "romanF146"));
-    // and it is sorted by time
     assert!(alert.photometry.windows(2).all(|w| w[0].jd <= w[1].jd));
 
     let filter_passed = alert
@@ -221,7 +203,6 @@ async fn test_filter_roman_alert() {
         "cutout_difference should not be empty"
     );
 
-    // verify that we can convert the alert to avro bytes
     let schema = load_alert_schema().unwrap();
     let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
 

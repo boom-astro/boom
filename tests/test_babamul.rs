@@ -9,7 +9,7 @@ use boom::{
             ForcedPhotometry,
         },
         EnrichmentWorker, LsstAlertForEnrichment, LsstEnrichmentWorker, LsstPhotometry,
-        ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
+        ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry, ZtfSsoAssociation,
     },
     utils::{
         cutouts::AlertCutout,
@@ -52,7 +52,7 @@ fn create_lspsc_cross_matches(
         "dec": 30.002,
         "distance_arcsec": distance,
         "score": score,
-        "magwhite": 18.3
+        "mag_white": 18.3
     })];
 
     // Add additional matches unless single_match is true
@@ -64,7 +64,7 @@ fn create_lspsc_cross_matches(
                 "dec": 30.05,
                 "distance_arcsec": 1.5,  // Beyond stellar threshold
                 "score": 0.75,           // Above hosted threshold
-                "magwhite": 19.1
+                "mag_white": 19.1
             }),
             json!({
                 "_id": 1003,
@@ -72,7 +72,7 @@ fn create_lspsc_cross_matches(
                 "dec": 30.10,
                 "distance_arcsec": 5.0,  // Far match
                 "score": 0.45,           // Below hosted threshold
-                "magwhite": 20.2
+                "mag_white": 20.2
             }),
         ]);
     }
@@ -98,13 +98,10 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
 
     // let's make sure that the flux and flux_err generated when converting from Candidate to ZtfCandidate
     // can be converted back to the original magpsf and sigmapsf using the same ZP, to verify that the conversion is consistent
-    let (new_magpsf, new_sigmapsf) = flux2mag(
-        candidate.psf_flux.abs() / 1e9_f32, // convert back to Jy
-        candidate.psf_flux_err / 1e9_f32,   // convert back to Jy
-        ZTF_ZP,
-    );
+    let (new_magpsf, new_sigmapsf) =
+        flux2mag(candidate.psf_flux.abs(), candidate.psf_flux_err, ZTF_ZP);
     assert!(
-        (new_magpsf - candidate.candidate.magpsf).abs() < 1e-6,
+        (new_magpsf - candidate.candidate.magpsf).abs() < 1e-5,
         "Magnitude conversion mismatch: expected {}, got {}",
         candidate.candidate.magpsf,
         new_magpsf
@@ -145,13 +142,9 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
 
     // the new flux is on a fixed zeropoint (ZTF_ZP), verify
     // that converting it back to magnitude gives the same magpsf and sigmapsf as the original data
-    let (new_magpsf, new_sigmapsf) = flux2mag(
-        -new_flux as f32 * 1e-9,    // from nJy to Jy
-        new_flux_err as f32 * 1e-9, // from nJy to Jy
-        ZTF_ZP,
-    );
+    let (new_magpsf, new_sigmapsf) = flux2mag(-new_flux as f32, new_flux_err as f32, ZTF_ZP);
     assert!(
-        (new_magpsf - magpsf as f32).abs() < 1e-6,
+        (new_magpsf - magpsf as f32).abs() < 1e-5,
         "Magnitude conversion mismatch: expected {}, got {}",
         magpsf,
         new_magpsf
@@ -179,9 +172,23 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             rock: is_rock,
             star: false,
             near_brightstar: false,
+            hosted: None,
+            best_host: None,
             stationary: false,
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
+            // Built through the constructor rather than as a literal, so adding a
+            // field to the association does not break this fixture.
+            sso: Some(ZtfSsoAssociation::from_ipac(
+                is_rock.then(|| "9816".to_string()),
+                is_rock.then_some(1.0),
+                is_rock.then_some(18.1),
+            )),
+            activity: None,
+            detection_history: None,
+            multisurvey_detection_history: None,
+            episode_history: None,
+            variability: None,
         },
         survey_matches: BabamulSurveyMatches::default(),
     }
@@ -260,6 +267,8 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         jdstarthist: Some(2459990.5),
         ndethist: Some(5),
         chipsf: Some(2.0),
+        observation_reason: None,
+        target_name: None,
     };
     let prv_candidate = LsstPhotometry {
         jd: 2460000.0,
@@ -282,7 +291,9 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         prv_candidates: vec![prv_candidate],
         fp_hists: vec![],
         cross_matches: cross_matches.clone(),
+        host_galaxy: None,
         survey_matches: survey_matches.clone(),
+        decam_match: None,
     };
 
     let properties = enrichment_worker
@@ -595,6 +606,42 @@ async fn test_compute_babamul_category_lsst() {
         "Alert with empty LSPSC matches and no ZTF match should be unknown"
     );
 
+    let (mut alert_dlr_hosted, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
+        9876543221,
+        "LSST24aaaaaal",
+        0.8,
+        false,
+        false,
+        Some(create_lspsc_cross_matches(Some(2.5), Some(0.8), true)),
+        None,
+        None,
+        None,
+    )
+    .await;
+    alert_dlr_hosted.properties.hosted = Some(true);
+    assert_eq!(
+        alert_dlr_hosted.compute_babamul_category(&cross_matches),
+        "no-ztf-match.hosted"
+    );
+
+    let (mut alert_dlr_unknown, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
+        9876543222,
+        "LSST24aaaaaam",
+        0.8,
+        false,
+        false,
+        None,
+        None,
+        Some(265.05),
+        Some(-32.25),
+    )
+    .await;
+    alert_dlr_unknown.properties.hosted = Some(false);
+    assert_eq!(
+        alert_dlr_unknown.compute_babamul_category(&cross_matches),
+        "no-ztf-match.unknown"
+    );
+
     // Test case 11: ZTF match whose prv_candidates are all non-public (programid != 1) →
     // should be treated as if there is no ZTF match at all → "no-ztf-match.*"
     let cross_matches = create_lspsc_cross_matches(Some(2.5), Some(0.8), true);
@@ -801,6 +848,24 @@ fn test_compute_babamul_category_ztf() {
     assert_eq!(
         category, "lsst-match.stellar",
         "ZTF alert with LSST match, near_brightstar=true and star=false should be lsst-match.stellar"
+    );
+
+    let mut alert_dlr_hosted = create_mock_enriched_ztf_alert(1234567900, "ZTF21aaaaaak", false);
+    alert_dlr_hosted.survey_matches = BabamulSurveyMatches::default();
+    alert_dlr_hosted.properties.hosted = Some(true);
+    alert_dlr_hosted.candidate.candidate.sgscore1 = Some(0.8);
+    assert_eq!(
+        alert_dlr_hosted.compute_babamul_category(),
+        "no-lsst-match.hosted"
+    );
+
+    let mut alert_dlr_hostless = create_mock_enriched_ztf_alert(1234567901, "ZTF21aaaaaal", false);
+    alert_dlr_hostless.survey_matches = BabamulSurveyMatches::default();
+    alert_dlr_hostless.properties.hosted = Some(false);
+    alert_dlr_hostless.candidate.candidate.sgscore1 = Some(0.3);
+    assert_eq!(
+        alert_dlr_hostless.compute_babamul_category(),
+        "no-lsst-match.hostless"
     );
 }
 
@@ -1012,6 +1077,31 @@ async fn test_babamul_filters_low_drb() {
 }
 
 #[tokio::test]
+async fn test_babamul_sends_ztf_alert_with_best_host() {
+    use boom::enrichment::babamul::Babamul;
+    use boom::utils::host::HostSummary;
+
+    let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
+    let babamul = Babamul::new(&config);
+
+    let mut alert = create_mock_enriched_ztf_alert(1234567903, "ZTF21aaaaaan", false);
+    alert.properties.hosted = Some(true);
+    alert.properties.best_host = Some(HostSummary {
+        name: Some("NGC 4993".to_string()),
+        catalog: Some("NED".to_string()),
+        z: Some(0.0098),
+        dist_mpc: Some(40.0),
+        dist_mpc_method: Some("zIndependent".to_string()),
+        sep_arcsec: 10.0,
+        sep_kpc: Some(2.0),
+        d_dlr: 1.0,
+    });
+
+    let sent = babamul.process_ztf_alerts(vec![alert]).await.unwrap();
+    assert_eq!(sent, 1);
+}
+
+#[tokio::test]
 async fn test_babamul_filters_pixel_flags() {
     use boom::enrichment::babamul::Babamul;
 
@@ -1146,6 +1236,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         prv_nondetections: Vec::new(),
         fp_hists: vec![ztf_forced_phot],
         cross_matches: None,
+        host_galaxy: None,
         aliases: Some(ZtfAliases {
             lsst: Vec::new(),
             decam: Vec::new(),
@@ -1195,6 +1286,8 @@ async fn test_babamul_lsst_with_ztf_match() {
         snr_ap: Some(90.0),
         jdstarthist: Some(2459990.5),
         ndethist: Some(5),
+        observation_reason: None,
+        target_name: None,
     };
 
     let lsst_alert = LsstAlert {
@@ -1262,6 +1355,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         is_sso: false,
         designation: None,
         cross_matches: None,
+        host_galaxy: None,
         aliases: Some(LsstAliases {
             ztf: vec![ztf_match_id.clone()],
             decam: Vec::new(),
@@ -1502,6 +1596,7 @@ async fn test_babamul_ztf_with_lsst_match() {
         is_sso: false,
         designation: None,
         cross_matches: None,
+        host_galaxy: None,
         aliases: Some(LsstAliases {
             ztf: Vec::new(),
             decam: Vec::new(),

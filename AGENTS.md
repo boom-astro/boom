@@ -1,0 +1,229 @@
+# Working in this repository
+
+Notes for anyone — human or agent — making changes here. This file covers the
+things that are easy to get wrong because nothing fails loudly when you do.
+For coding conventions (error handling, instrumentation, logging), see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Skills live in `.agents/skills/`
+
+Step-by-step guidance for a particular kind of change — adding a data task
+type, adding an archival catalog — is in `.agents/skills/<name>/SKILL.md`. The
+sections below link the relevant one where it applies; read it before starting
+that kind of work, because what those files carry is the registration points
+and the order of operations that nothing fails loudly about.
+
+`.agents/` rather than a vendor's directory, so the guidance is not addressed
+to one tool. The trade is that a harness looking only in its own directory will
+not offer them as commands, so treat them as files to open.
+
+## Production configs are generated — never edit them directly
+
+`config/prod/*/config.yaml` are **build artifacts**. Each one is the base
+`config.yaml` deep-merged with that deployment's `overrides.yaml`, and each
+carries an `AUTO-GENERATED FILE. DO NOT EDIT DIRECTLY.` banner on line 1.
+
+```text
+config.yaml                          # base: every setting, with defaults
+config/prod/caltech/overrides.yaml   # the ONLY file you hand-edit per deployment
+config/prod/caltech/config.yaml      # generated; committed so PRs are reviewable
+```
+
+To change a deployment's configuration:
+
+1. Add the setting (with its default) to the base `config.yaml`.
+2. Put the deployment-specific value in that deployment's `overrides.yaml`.
+3. Run `make configs` to regenerate, and commit the regenerated file too.
+4. `make check-configs` regenerates *and* parses each result through
+   `check_config`; use it before pushing.
+
+Hand-editing a generated `config.yaml` looks like it works — the file parses,
+the app starts, review passes — and then it silently reverts. The `Sync
+configs` workflow (`.github/workflows/sync-configs.yaml`) runs
+`make check-configs` on every pull request and **commits the regenerated files
+back to your branch**, discarding anything that didn't come from the base
+config or an `overrides.yaml`. On fork PRs it fails the build instead. Either
+way the hand-edit does not survive, and the setting it was carrying quietly
+reverts to the base default.
+
+Hand-editing also tends to produce a file the generator never would: adding a
+key to the deployment config but not to the base loses the sibling keys the
+merge would have carried down.
+
+The merge is `yq eval-all '. as $item ireduce ({}; . * $item)'`, a deep merge
+that preserves comments. Comments in the base config propagate into every
+generated config, and a comment in `overrides.yaml` *replaces* the base's for
+that key — so leave a key's comment out of the override unless you mean to
+shadow it.
+
+Lists are the exception to the deep merge: an array is replaced wholesale, not
+merged element by element. That is why `crossmatch.<survey>` is a map keyed by
+catalog name rather than a list. An override adds a catalog by naming it,
+retunes one by setting only the fields it changes, drops one inherited from the
+base with `PS1_DR2: null`, and unsets a single inherited field with
+`type_key: null`. Declaration order is preserved and it matters: the first
+catalog is the collection the others are `$unionWith`-ed onto.
+
+## Secrets belong in the environment, not in YAML
+
+Every `*.yaml` in this repo is committed, including the generated production
+configs. Credentials therefore come from environment variables only, and the
+YAML holds just the non-secret settings. Config is loaded from `config.yaml`
+and then overlaid with `BOOM_`-prefixed env vars (`__` separates nesting
+levels), so any field can be supplied that way:
+
+```sh
+BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET="…"   # babamul.oauth.google.client_secret
+```
+
+Prefer deriving "is this feature on?" from whether its credential is present,
+rather than adding a separate `enabled:` flag in YAML. A flag that lives apart
+from the secret can be switched on without one, which fails open at the worst
+moment; presence-based enablement fails closed. `posthog.project_api_key` and
+`babamul.oauth.*` both work this way.
+
+Document every new variable in `.env.example`, and add it to the relevant
+service in `docker-compose.yaml` — the compose files list env vars explicitly,
+so an undeclared one silently never reaches the container.
+
+An empty variable counts as *unset*, not as "set to empty": `load_raw_config`
+passes `ignore_empty(true)` to the env source. This matters because a compose
+line like `BOOM_BABAMUL__WEBAPP_URL: ${BOOM_BABAMUL__WEBAPP_URL:-}` renders as
+`BOOM_BABAMUL__WEBAPP_URL=` for every deployment that doesn't set it — without
+`ignore_empty` that blank would win over the value in
+`config/prod/<deployment>/config.yaml`, and the setting would vanish with the
+file, the container environment, and the deploy workflow all looking correct.
+The flip side: a value cannot be *cleared* from the environment. To turn
+something off, give it an empty value in `config.yaml` (which is what
+`posthog.project_api_key` and the `babamul.oauth.*` credentials do) rather than
+expecting `FOO=` to blank it.
+
+## Tests need real services
+
+The suite talks to actual infrastructure rather than mocks, so results depend
+on what is running:
+
+- **MongoDB** is required by most of `cargo test` (library tests under
+  `src/alert`, `src/filter`, and the whole `tests/api` suite). Without it you
+  will see a wall of failures that have nothing to do with your change.
+- **Kafka** is additionally required by the Kafka-credential tests, which shell
+  out to `kafka-configs`/`kafka-acls`.
+- `tests/config.test.yaml` is the config used by tests; it points at
+  `localhost:27017` with `mongoadmin` / `mongoadminsecret`.
+
+`make dev` brings up the full dev stack. For a quick MongoDB-only run:
+
+```sh
+docker run -d --name boom-test-mongo -p 27017:27017 \
+  -e MONGO_INITDB_ROOT_USERNAME=mongoadmin \
+  -e MONGO_INITDB_ROOT_PASSWORD=mongoadminsecret mongo:8.2
+```
+
+Before claiming a pre-existing failure is your fault (or that it isn't), check
+it against a clean tree — `git stash`, run the one test, `git stash pop`. A few
+integration tests also flake under parallel access to a shared database; rerun
+in isolation before chasing one.
+
+## Prose conventions
+
+These apply to comments, doc comments, log lines, and user-facing strings —
+anywhere the repo writes English rather than code.
+
+- **Terse but accurate.** Say what the code cannot — the constraint, the
+  failure being avoided, why the obvious alternative is wrong — and stop. One
+  line is the default, two is common, and past three it is worth asking what
+  the extra lines are doing. A comment longer than the code it explains means
+  the reasoning belongs in the commit message or a doc, with a pointer to it
+  here if it needs one. Three habits account for most of the overrun:
+  - **Do not argue for the change.** A comment explaining what was broken
+    before, or why this diff is the right one, is commit-message content. The
+    comment is for someone reading the code much later, who cannot see the
+    diff and has no reason to know there was ever a bug. A comment phrased as
+    a contrast — "X, not Y" — is usually still arguing with the code it
+    replaced; say what holds, not what it is not.
+  - **Say it once.** A rule belongs at the single place it is decided, not
+    restated at each call site and again in the tests. If it needs repeating,
+    the repetitions should be a pointer to the one statement of it.
+  - **Do not restate the code.** If the line below says it, delete the line
+    above.
+- **US spelling.** `normalized`, not `normalised`; `honored`, `canceled`,
+  `catalog`, `center`, `labeled`. The `-ize`/`-or` forms throughout.
+- **One space after a period.** Not two.
+- **"Client", not "web app"**, for whatever is calling the API. The React app
+  is one client; API tokens and the Kafka consumers are others, and a comment
+  that says "web app" quietly excludes them. `babamul.webapp_url` keeps its
+  name because it is a published config key and environment variable — the
+  convention is about prose, not about renaming deployed settings.
+
+Nothing enforces these, so they are worth a glance in review.
+
+## Bulk data never goes in git
+
+Catalog ingests, the boompy downloaders and the offline LS DR10 pipeline all
+write large binaries into the working tree — a chunk in flight, a converted
+parquet, a staged dataset. `.gitignore` excludes them **by extension**, not by
+directory, because the download path is configurable and listing directories
+only protects the ones someone thought of. The handful of binaries the repo does
+track (`data/models/`, `data/filters/`, `tests/data/`, the LS footprint) are
+re-included by explicit negation, so adding a new one means naming it there
+rather than reaching for `git add -f`.
+
+Two habits that go with it:
+
+- **Stage explicit paths.** `git add -A` in a tree where a background job is
+  writing will commit whatever it happened to produce. That is how a 42 MB
+  archive once ended up in a commit, with a 165 MB `.fits` queued to LFS behind
+  it.
+- **Check what a commit contains before pushing**, especially after running an
+  ingest: `git rev-list --objects @{u}..HEAD | git cat-file --batch-check=\
+  '%(objecttype) %(objectsize) %(rest)' | awk '$1=="blob" && $2>1000000'`
+  lists any blob over a megabyte in the unpushed range.
+
+## Data-mutating work is a task, not a binary
+
+Migrations, backfills, reprocessing and catalog ingests run through the task
+system, so they survive a deploy, stream their logs, can be cancelled, and leave
+a `data_mutations` entry naming the commit that ran. `src/bin/` holds services
+plus `check_config` and `add_filter`, which change nothing; a new data-mutating
+binary there is the one thing to avoid.
+
+Adding one: [`.agents/skills/add-data-task-type/SKILL.md`](.agents/skills/add-data-task-type/SKILL.md),
+with the reasoning in [docs/task-system.md](docs/task-system.md). Registration
+has five points in `src/tasks/mod.rs` and, like API routes, missing one fails
+quietly — `cargo test --lib tasks::tests` catches it.
+
+You can run a task against production data from a branch without merging, and
+the ledger still records which commit did it. The skill has the commands.
+
+Adding an archival catalog is its own path — a boompy downloader, a record type
+and a `CatalogDef`, ingested from the admin page *before* anything crossmatches
+against it:
+[`.agents/skills/add-data-catalog/SKILL.md`](.agents/skills/add-data-catalog/SKILL.md),
+with the reasoning in [docs/catalogs.md](docs/catalogs.md).
+
+## Checks to run
+
+```sh
+cargo fmt --all                 # or `make format` for pre-commit on everything
+cargo clippy --lib --bins --tests
+cd boompy && uv run pytest      # if you touched boompy
+make check-configs              # if you touched any config
+cd frontend && npx tsc --noEmit -p tsconfig.app.json && npm run build
+```
+
+Clippy is noisy with pre-existing warnings across the tree; filter to the files
+you touched (`--message-format=short | grep <your file>`) rather than trying to
+read the whole output.
+
+## API surface
+
+New Babamul or BOOM API routes need to be added in three places, and missing
+any one of them fails quietly:
+
+1. `src/api/routes/**` — the handler, with its `#[utoipa::path(...)]` attribute.
+2. `src/bin/api.rs` — `.service(...)` registration, inside the right scope.
+3. `src/api/docs.rs` — the `paths(...)` list, or it won't appear in `/docs`.
+
+Routes that must work without a token also need to be allowed in
+`src/api/auth.rs`: `PUBLIC_ROUTES` / `BABAMUL_PUBLIC_ROUTES` match exact paths,
+so anything with a path parameter needs a prefix check instead.

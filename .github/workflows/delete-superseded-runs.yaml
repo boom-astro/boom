@@ -1,0 +1,65 @@
+name: Delete superseded cancelled runs
+
+# A run cancelled by `concurrency` because a newer commit superseded it stays
+# visible as a red cross on the commit. This deletes those runs so a red status
+# always means a test actually failed.
+#
+# It runs via `workflow_run`, which executes in the base repo with a writable
+# token, so it keeps `actions: write` even for runs triggered by fork PRs.
+
+on:
+  workflow_run:
+    workflows:
+      - "Unit Tests"
+      - "Throughput test"
+      - "Check formatting"
+      - "Frontend"
+      - "Sync configs"
+    types:
+      - completed
+
+permissions:
+  actions: write
+
+jobs:
+  delete-superseded:
+    name: Delete superseded run
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'cancelled'
+    steps:
+      - name: Delete the run only if it was superseded by a newer run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+        run: |
+          set -euo pipefail
+
+          # cancel-in-progress is false on main, so a cancelled main run is
+          # always a manual cancel.
+          if [ "$BRANCH" = "main" ]; then
+            echo "Run $RUN_ID is on 'main', never superseded by concurrency, keeping it."
+            exit 0
+          fi
+
+          # The list endpoint sorts by created_at descending, so per_page=1 is
+          # the latest run. Pass params via -f so refs with '/' get encoded.
+          latest_run_number=$(gh api -X GET \
+            -f branch="$BRANCH" -f per_page=1 \
+            "/repos/$REPO/actions/workflows/$WORKFLOW_ID/runs" \
+            --jq '.workflow_runs[0].run_number // empty')
+
+          if ! [[ "$latest_run_number" =~ ^[0-9]+$ ]]; then
+            echo "Could not determine latest run number for '$BRANCH' (got '$latest_run_number'); keeping run $RUN_ID."
+            exit 0
+          fi
+
+          if [ "$latest_run_number" -gt "$RUN_NUMBER" ]; then
+            echo "Run $RUN_ID (#$RUN_NUMBER) on '$BRANCH' was superseded by run #$latest_run_number. Deleting it."
+            gh api -X DELETE "/repos/$REPO/actions/runs/$RUN_ID"
+          else
+            echo "Run $RUN_ID (#$RUN_NUMBER) is the latest for '$BRANCH', likely cancelled manually. Keeping it."
+          fi

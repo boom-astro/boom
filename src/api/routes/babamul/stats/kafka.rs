@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(10);
-const BABAMUL_KAFKA_TOPICS_CACHE_KEY: &str = "babamul_kafka_topics";
+pub(super) const BABAMUL_KAFKA_TOPICS_CACHE_KEY: &str = "babamul_kafka_topics";
 /// Cache Kafka topic stats for 5 minutes.
 const BABAMUL_KAFKA_TOPICS_CACHE_SECS: f64 = 5.0 * 60.0;
 

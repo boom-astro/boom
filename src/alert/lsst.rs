@@ -11,12 +11,12 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         lightcurves::{flux2mag, fluxerr2diffmaglim, Band, LSST_ZP_AB_NJY, SNT},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
     },
 };
-use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use constcat::concat;
 use flare::Time;
@@ -49,12 +49,6 @@ pub const LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL: &str =
 /// compatibility when an Avro schema makes a previously-optional field mandatory, while our
 /// Rust structs keep the field as `Option<T>`.
 ///
-/// Currently implemented for `visit_i32` only, covering the Avro `int` fields that went from
-/// optional to non-optional in LSST alert schema v10 → v11 (`long`/`i64` fields were
-/// unaffected). If future schema versions make other field types mandatory (e.g. `long`,
-/// `float`, `boolean`), extend this visitor with the corresponding `visit_*` method and apply
-/// `#[serde_as(deserialize_as = "FlexibleOption")]` to the newly affected fields.
-///
 /// Wire-format cases handled:
 ///   Union(Null)   → visit_unit  → None
 ///   Union(Int(n)) → visit_i32   → Some(n)   (v10: field was nullable)
@@ -84,6 +78,14 @@ impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for FlexibleOptionVisitor
 
     fn visit_i32<E: serde::de::Error>(self, v: i32) -> Result<Option<T>, E> {
         T::deserialize(serde::de::value::I32Deserializer::<E>::new(v)).map(Some)
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Option<T>, E> {
+        T::deserialize(serde::de::value::BoolDeserializer::<E>::new(v)).map(Some)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Option<T>, E> {
+        T::deserialize(serde::de::value::StrDeserializer::<E>::new(v)).map(Some)
     }
 }
 
@@ -117,42 +119,45 @@ pub struct DiaSource {
     /// Id of the parent diaSource this diaSource has been deblended from, if any.
     #[serde(rename = "parentDiaSourceId")]
     pub parent_dia_source_id: Option<i64>,
-    /// Effective mid-visit time for this diaSource, expressed as Modified Julian Date, International Atomic Time.
+    /// Effective mid-visit time for this diaSource, expressed as Modified Julian Date, International Atomic Time [d].
     #[serde(rename = "midpointMjdTai")]
     pub midpoint_mjd_tai: f64,
-    /// Right ascension coordinate of the center of this diaSource.
+    /// Effective exposure time for this diaSource [s].
+    #[serde(rename = "exposureTime")]
+    pub exposure_time: Option<f32>,
+    /// Right ascension coordinate of the center of this diaSource [deg].
     pub ra: f64,
-    /// Uncertainty of ra.
+    /// Angular error of Right Ascension (dRA*cos(Dec)) [deg].
     #[serde(rename = "raErr")]
     pub ra_err: Option<f32>,
-    /// Declination coordinate of the center of this diaSource.
+    /// Declination coordinate of the center of this diaSource [deg].
     pub dec: f64,
-    /// Uncertainty of dec.
+    /// Angular error of dec [deg].
     #[serde(rename = "decErr")]
     pub dec_err: Option<f32>,
     /// General centroid algorithm failure flag; set if anything went wrong when fitting the centroid. Another centroid flag field should also be set to provide more information.
     pub centroid_flag: Option<bool>,
-    /// Flux in a 12 pixel radius aperture on the difference image.
+    /// Flux in a 12 pixel radius aperture on the difference image [nJy].
     #[serde(rename = "apFlux")]
     pub ap_flux: Option<f32>,
-    /// Estimated uncertainty of apFlux.
+    /// Estimated uncertainty of apFlux [nJy].
     #[serde(rename = "apFluxErr")]
     pub ap_flux_err: Option<f32>,
     /// General aperture flux algorithm failure flag; set if anything went wrong when measuring aperture fluxes. Another apFlux flag field should also be set to provide more information.
     #[serde(rename = "apFlux_flag")]
     pub ap_flux_flag: Option<bool>,
-    /// Aperture did not fit within measurement image.
+    /// The source is closer to the edge of the measurement image than the aperture radius.
     #[serde(rename = "apFlux_flag_apertureTruncated")]
     pub ap_flux_flag_aperture_truncated: Option<bool>,
-    /// Source was detected as significantly negative.
+    /// The original peak on the PSF-convolved detection difference image was negative.
     #[serde(rename = "isNegative")]
     pub is_negative: Option<bool>,
     /// The signal-to-noise ratio at which this source was detected in the difference image.
     pub snr: Option<f32>,
-    /// Flux for Point Source model. Note this actually measures the flux difference between the template and the visit image.
+    /// Flux for Point Source model. Note this actually measures the flux difference between the template and the visit image [nJy].
     #[serde(rename = "psfFlux")]
     pub psf_flux: Option<f32>,
-    /// Uncertainty of psfFlux.
+    /// Uncertainty of psfFlux [nJy].
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: Option<f32>,
     /// Chi^2 statistic of the point source model fit.
@@ -171,34 +176,34 @@ pub struct DiaSource {
     /// Not enough non-rejected pixels in data to attempt the fit.
     #[serde(rename = "psfFlux_flag_noGoodPixels")]
     pub psf_flux_flag_no_good_pixels: Option<bool>,
-    /// Flux for a trailed source model. Note this actually measures the flux difference between the template and the visit image.
+    /// Flux for a trailed source model. Note this actually measures the flux difference between the template and the visit image [nJy].
     #[serde(rename = "trailFlux")]
     pub trail_flux: Option<f32>,
-    /// Uncertainty of trailFlux.
+    /// Uncertainty of trailFlux [nJy].
     #[serde(rename = "trailFluxErr")]
     pub trail_flux_err: Option<f32>,
-    /// Right ascension coordinate of centroid for trailed source model.
+    /// Right ascension coordinate of centroid for trailed source model [deg].
     #[serde(rename = "trailRa")]
     pub trail_ra: Option<f64>,
-    /// Uncertainty of trailRa.
+    /// Angular error of trailRa (dRA*cos(Dec)) [deg].
     #[serde(rename = "trailRaErr")]
     pub trail_ra_err: Option<f32>,
-    /// Declination coordinate of centroid for trailed source model.
+    /// Declination coordinate of centroid for trailed source model [deg].
     #[serde(rename = "trailDec")]
     pub trail_dec: Option<f64>,
-    /// Uncertainty of trailDec.
+    /// Angular error of trailDec [deg].
     #[serde(rename = "trailDecErr")]
     pub trail_dec_err: Option<f32>,
-    /// Maximum likelihood fit of trail length.
+    /// Maximum likelihood fit of trail length [arcsec].
     #[serde(rename = "trailLength")]
     pub trail_length: Option<f32>,
-    /// Uncertainty of trailLength.
+    /// Uncertainty of trailLength [arcsec].
     #[serde(rename = "trailLengthErr")]
     pub trail_length_err: Option<f32>,
-    /// Maximum likelihood fit of the angle between the meridian through the centroid and the trail direction (bearing).
+    /// Maximum likelihood fit of the angle between the meridian through the centroid and the trail direction (bearing) [deg].
     #[serde(rename = "trailAngle")]
     pub trail_angle: Option<f32>,
-    /// Uncertainty of trailAngle.
+    /// Uncertainty of trailAngle [deg].
     #[serde(rename = "trailAngleErr")]
     pub trail_angle_err: Option<f32>,
     /// Chi^2 statistic of the trailed source model fit.
@@ -210,10 +215,15 @@ pub struct DiaSource {
     pub trail_ndata: Option<i32>,
     /// This flag is set if a trailed source extends onto or past edge pixels.
     pub trail_flag_edge: Option<bool>,
-    /// Forced photometry flux for a point source model measured on the visit image centered at DiaSource position
+    /// The trailed source fitting algorithm failed.
+    pub trail_flag: Option<bool>,
+    /// Integer key indicating which algorithm was used to measure trailed source. 1=SDSSShape, 2=HSMShape.
+    #[serde(rename = "trailAlgorithm")]
+    pub trail_algorithm: Option<i32>,
+    /// Forced photometry flux for a point source model measured on the visit image centered at DiaSource position [nJy].
     #[serde(rename = "scienceFlux")]
     pub science_flux: Option<f32>,
-    /// Uncertainty of scienceFlux.
+    /// Estimated uncertainty of scienceFlux [nJy].
     #[serde(rename = "scienceFluxErr")]
     pub science_flux_err: Option<f32>,
     /// Forced PSF photometry on science image failed. Another forced_PsfFlux flag field should also be set to provide more information.
@@ -225,15 +235,15 @@ pub struct DiaSource {
     /// Forced PSF flux not enough non-rejected pixels in data to attempt the fit.
     #[serde(rename = "forced_PsfFlux_flag_noGoodPixels")]
     pub forced_psf_flux_flag_no_good_pixels: Option<bool>,
-    /// Forced photometry flux for a point source model measured on the template image centered at the DiaObject position.
+    /// Forced photometry flux for a point source model measured on the template image centered at the DiaObject position [nJy].
     #[serde(rename = "templateFlux")]
     pub template_flux: Option<f32>,
-    /// Uncertainty of templateFlux.
+    /// Uncertainty of templateFlux [nJy].
     #[serde(rename = "templateFluxErr")]
     pub template_flux_err: Option<f32>,
     /// General source shape algorithm failure flag; set if anything went wrong when measuring the shape. Another shape flag field should also be set to provide more information.
     pub shape_flag: Option<bool>,
-    /// No pixels to measure shape.
+    /// No pixels were useable for computing shape measurement.
     pub shape_flag_no_pixels: Option<bool>,
     /// Center not contained in footprint bounding box.
     pub shape_flag_not_contained: Option<bool>,
@@ -241,8 +251,11 @@ pub struct DiaSource {
     pub shape_flag_parent_source: Option<bool>,
     /// A measure of extendedness, computed by comparing an object's moment-based traced radius to the PSF moments. extendedness = 1 implies a high degree of confidence that the source is extended. extendedness = 0 implies a high degree of confidence that the source is point-like.
     pub extendedness: Option<f32>,
-    /// A measure of reliability, computed using information from the source and image characterization, as well as the information on the Telescope and Camera system (e.g., ghost maps, defect maps, etc.).
+    /// Probability (0-1) that the diaSource is astrophysical, derived from a machine learning model.
     pub reliability: Option<f32>,
+    /// Version of the reliability model.
+    #[serde(rename = "reliabilityVersion")]
+    pub reliability_version: Option<String>,
     /// Filter band this source was observed with.
     pub band: Option<Band>,
     /// Source well fit by a dipole.
@@ -284,10 +297,13 @@ pub struct DiaSource {
     /// Saturated pixel in the 3x3 region around the centroid.
     #[serde(rename = "pixelFlags_saturatedCenter")]
     pub pixel_flags_saturated_center: Option<bool>,
-    /// DiaSource's footprint includes suspect pixels.
+    /// The diaSource footprint includes pixels on a predicted diffraction spike of a bright star.
+    #[serde(rename = "pixelFlags_spike")]
+    pub pixel_flags_spike: Option<bool>,
+    /// DiaSource's footprint includes pixels masked as SUSPECT that are approaching the saturation threshold.
     #[serde(rename = "pixelFlags_suspect")]
     pub pixel_flags_suspect: Option<bool>,
-    /// Suspect pixel in the 3x3 region around the centroid.
+    /// The 3x3 region around the centroid of the DiaSource includes pixels masked as SUSPECT that are approaching the saturation threshold
     #[serde(rename = "pixelFlags_suspectCenter")]
     pub pixel_flags_suspect_center: Option<bool>,
     /// Streak in the DiaSource footprint.
@@ -296,20 +312,41 @@ pub struct DiaSource {
     /// Streak in the 3x3 region around the centroid.
     #[serde(rename = "pixelFlags_streakCenter")]
     pub pixel_flags_streak_center: Option<bool>,
-    /// Injection in the DiaSource footprint.
+    /// A pixel in the diaSource footprint contains at least one pixel modified by injecting fake sources.
     #[serde(rename = "pixelFlags_injected")]
     pub pixel_flags_injected: Option<bool>,
-    /// Injection in the 3x3 region around the centroid.
+    /// A pixel in the 3x3 region around the centroid contains at least one pixel modified by injecting fake sources.
     #[serde(rename = "pixelFlags_injectedCenter")]
     pub pixel_flags_injected_center: Option<bool>,
-    /// Template injection in the DiaSource footprint.
+    /// A pixel in the diaSource footprint contains at least one pixel modified by injecting fake sources into the template.
     #[serde(rename = "pixelFlags_injected_template")]
     pub pixel_flags_injected_template: Option<bool>,
-    /// Template injection in the 3x3 region around the centroid.
+    /// A pixel in the 3x3 region around the centroid contains at least one pixel modified by injecting fake sources into the template.
     #[serde(rename = "pixelFlags_injected_templateCenter")]
     pub pixel_flags_injected_template_center: Option<bool>,
-    /// This flag is set if the source is part of a glint trail.
+    /// This flag is set if the source is likely part of a glint trail from an artifical satellite.
     pub glint_trail: Option<bool>,
+    /// Weighted mean of the mid-exposure times of the template input images that cover the diaSource centroid, expressed as Modified Julian Date, International Atomic Time. Each input is weighted by its share of the template there, estimated from the coadd weights [d].
+    #[serde(rename = "templateMjdMean")]
+    pub template_mjd_mean: Option<f64>,
+    /// Earliest mid-exposure time of the template input images that cover the diaSource centroid, expressed as Modified Julian Date, International Atomic Time [d].
+    #[serde(rename = "templateMjdMin")]
+    pub template_mjd_min: Option<f64>,
+    /// Latest mid-exposure time of the template input images that cover the diaSource centroid, expressed as Modified Julian Date, International Atomic Time [d].
+    #[serde(rename = "templateMjdMax")]
+    pub template_mjd_max: Option<f64>,
+    /// Name of the instrument whose observations were coadded to make the template, or UNKNOWN if it is not known.
+    #[serde(rename = "templateInstrument")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
+    pub template_instrument: Option<String>,
+    /// Version of the template. It is 1 if the template is from a different instrument than the diaSource, and 0 otherwise.
+    #[serde(rename = "templateVersion")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
+    pub template_version: Option<i32>,
+    /// Set if the template instrument is known and differs from the instrument that observed the diaSource.
+    #[serde(rename = "mixedInstruments")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
+    pub mixed_instruments: Option<bool>,
 }
 
 #[serde_as]
@@ -333,10 +370,17 @@ pub struct LsstCandidate {
     pub snr_ap: Option<f32>,
     pub jdstarthist: Option<f64>,
     pub ndethist: Option<i32>,
+    pub observation_reason: Option<String>,
+    pub target_name: Option<String>,
 }
 
 impl LsstCandidate {
-    fn new(dia_source: DiaSource, dia_object: Option<DiaObject>) -> Result<Self, AlertError> {
+    pub(crate) fn new(
+        dia_source: DiaSource,
+        dia_object: Option<DiaObject>,
+        observation_reason: Option<String>,
+        target_name: Option<String>,
+    ) -> Result<Self, AlertError> {
         let jd = Epoch::from_mjd_tai(dia_source.midpoint_mjd_tai).to_jde_utc_days();
         let psf_flux = dia_source.psf_flux.ok_or(AlertError::MissingFluxPSF)?;
         let psf_flux_err = dia_source.psf_flux_err.ok_or(AlertError::MissingFluxPSF)?;
@@ -377,11 +421,10 @@ impl LsstCandidate {
 
         let (jdstarthist, ndethist) = match dia_object {
             Some(obj) => {
-                let jdstarthist = if obj.first_dia_source_mjd_tai > 0.0 {
-                    Some(Epoch::from_mjd_tai(obj.first_dia_source_mjd_tai).to_jde_utc_days())
-                } else {
-                    None
-                };
+                let jdstarthist = obj
+                    .first_dia_source_mjd_tai
+                    .filter(|mjd| *mjd > 0.0)
+                    .map(|mjd| Epoch::from_mjd_tai(mjd).to_jde_utc_days());
                 (jdstarthist, Some(obj.n_dia_sources))
             }
             None => (None, None),
@@ -402,6 +445,8 @@ impl LsstCandidate {
             snr_ap: Some(ap_flux_abs / ap_flux_err),
             jdstarthist,
             ndethist,
+            observation_reason,
+            target_name,
         })
     }
 }
@@ -531,198 +576,199 @@ pub struct DiaObject {
     /// Processing time when validity of this diaObject starts, expressed as Modified Julian Date, International Atomic Time.
     #[serde(rename = "validityStartMjdTai")]
     pub validity_start_mjd_tai: f64,
-    /// Right ascension coordinate of the position of the object at time radecMjdTai.
+    /// Right ascension coordinate of the position of the object [deg].
     pub ra: f64,
-    /// Uncertainty of ra.
+    /// Angular error of Right Ascension (dRA*cos(Dec)) [deg].
     #[serde(rename = "raErr")]
     pub ra_err: Option<f32>,
-    /// Declination coordinate of the position of the object at time radecMjdTai.
+    /// Declination coordinate of the position of the object [deg].
     pub dec: f64,
-    /// Uncertainty of dec.
+    /// Angular error of dec [deg].
     #[serde(rename = "decErr")]
     pub dec_err: Option<f32>,
-    /// Weighted mean point-source model magnitude for u filter.
+    /// Weighted mean point-source model magnitude for u filter [nJy].
     #[serde(rename = "u_psfFluxMean")]
     pub u_psf_flux_mean: Option<f32>,
-    /// Standard error of u_psfFluxMean.
+    /// Standard error of u_psfFluxMean [nJy].
     #[serde(rename = "u_psfFluxMeanErr")]
     pub u_psf_flux_mean_err: Option<f32>,
     /// Chi^2 statistic for the scatter of u_psfFlux around u_psfFluxMean.
     #[serde(rename = "u_psfFluxChi2")]
     pub u_psf_flux_chi2: Option<f32>,
-    /// The number of data points used to compute u_psfFluxChi2.
+    /// The number of u-band data points.
     #[serde(rename = "u_psfFluxNdata")]
     #[serde_as(deserialize_as = "FlexibleOption")]
     pub u_psf_flux_ndata: Option<i32>,
-    /// Weighted mean forced photometry flux for u filter.
+    /// Weighted mean forced photometry flux for u filter [nJy].
     #[serde(rename = "u_fpFluxMean")]
     pub u_fp_flux_mean: Option<f32>,
-    /// Standard error of u_fpFluxMean.
+    /// Standard error of u_fpFluxMean [nJy].
     #[serde(rename = "u_fpFluxMeanErr")]
     pub u_fp_flux_mean_err: Option<f32>,
-    /// Weighted mean point-source model magnitude for g filter.
+    /// Weighted mean point-source model magnitude for g filter [nJy].
     #[serde(rename = "g_psfFluxMean")]
     pub g_psf_flux_mean: Option<f32>,
-    /// Standard error of g_psfFluxMean.
+    /// Standard error of g_psfFluxMean [nJy].
     #[serde(rename = "g_psfFluxMeanErr")]
     pub g_psf_flux_mean_err: Option<f32>,
     /// Chi^2 statistic for the scatter of g_psfFlux around g_psfFluxMean.
     #[serde(rename = "g_psfFluxChi2")]
     pub g_psf_flux_chi2: Option<f32>,
-    /// The number of data points used to compute g_psfFluxChi2.
+    /// The number of g-band data points.
     #[serde(rename = "g_psfFluxNdata")]
     #[serde_as(deserialize_as = "FlexibleOption")]
     pub g_psf_flux_ndata: Option<i32>,
-    /// Weighted mean forced photometry flux for g filter.
+    /// Weighted mean forced photometry flux for g filter [nJy].
     #[serde(rename = "g_fpFluxMean")]
     pub g_fp_flux_mean: Option<f32>,
-    /// Standard error of g_fpFluxMean.
+    /// Standard error of g_fpFluxMean [nJy].
     #[serde(rename = "g_fpFluxMeanErr")]
     pub g_fp_flux_mean_err: Option<f32>,
-    /// Weighted mean point-source model magnitude for r filter.
+    /// Weighted mean point-source model magnitude for r filter [nJy].
     #[serde(rename = "r_psfFluxMean")]
     pub r_psf_flux_mean: Option<f32>,
-    /// Standard error of r_psfFluxMean.
+    /// Standard error of r_psfFluxMean [nJy].
     #[serde(rename = "r_psfFluxMeanErr")]
     pub r_psf_flux_mean_err: Option<f32>,
     /// Chi^2 statistic for the scatter of r_psfFlux around r_psfFluxMean.
     #[serde(rename = "r_psfFluxChi2")]
     pub r_psf_flux_chi2: Option<f32>,
-    /// The number of data points used to compute r_psfFluxChi2.
+    /// The number of r-band data points.
     #[serde(rename = "r_psfFluxNdata")]
     #[serde_as(deserialize_as = "FlexibleOption")]
     pub r_psf_flux_ndata: Option<i32>,
-    /// Weighted mean forced photometry flux for r filter.
+    /// Weighted mean forced photometry flux for r filter [nJy].
     #[serde(rename = "r_fpFluxMean")]
     pub r_fp_flux_mean: Option<f32>,
-    /// Standard error of r_fpFluxMean.
+    /// Standard error of r_fpFluxMean [nJy].
     #[serde(rename = "r_fpFluxMeanErr")]
     pub r_fp_flux_mean_err: Option<f32>,
-    /// Weighted mean point-source model magnitude for i filter.
+    /// Weighted mean point-source model magnitude for i filter [nJy].
     #[serde(rename = "i_psfFluxMean")]
     pub i_psf_flux_mean: Option<f32>,
-    /// Standard error of i_psfFluxMean.
+    /// Standard error of i_psfFluxMean [nJy].
     #[serde(rename = "i_psfFluxMeanErr")]
     pub i_psf_flux_mean_err: Option<f32>,
     /// Chi^2 statistic for the scatter of i_psfFlux around i_psfFluxMean.
     #[serde(rename = "i_psfFluxChi2")]
     pub i_psf_flux_chi2: Option<f32>,
-    /// The number of data points used to compute i_psfFluxChi2.
+    /// The number of i-band data points.
     #[serde(rename = "i_psfFluxNdata")]
     #[serde_as(deserialize_as = "FlexibleOption")]
     pub i_psf_flux_ndata: Option<i32>,
-    /// Weighted mean forced photometry flux for i filter.
+    /// Weighted mean forced photometry flux for i filter [nJy].
     #[serde(rename = "i_fpFluxMean")]
     pub i_fp_flux_mean: Option<f32>,
-    /// Standard error of i_fpFluxMean.
+    /// Standard error of i_fpFluxMean [nJy].
     #[serde(rename = "i_fpFluxMeanErr")]
     pub i_fp_flux_mean_err: Option<f32>,
-    /// Weighted mean point-source model magnitude for z filter.
+    /// Weighted mean point-source model magnitude for z filter [nJy].
     #[serde(rename = "z_psfFluxMean")]
     pub z_psf_flux_mean: Option<f32>,
-    /// Standard error of z_psfFluxMean.
+    /// Standard error of z_psfFluxMean [nJy].
     #[serde(rename = "z_psfFluxMeanErr")]
     pub z_psf_flux_mean_err: Option<f32>,
     /// Chi^2 statistic for the scatter of z_psfFlux around z_psfFluxMean.
     #[serde(rename = "z_psfFluxChi2")]
     pub z_psf_flux_chi2: Option<f32>,
-    /// The number of data points used to compute z_psfFluxChi2.
+    /// The number of z-band data points.
     #[serde(rename = "z_psfFluxNdata")]
     #[serde_as(deserialize_as = "FlexibleOption")]
     pub z_psf_flux_ndata: Option<i32>,
-    /// Weighted mean forced photometry flux for z filter.
+    /// Weighted mean forced photometry flux for z filter [nJy].
     #[serde(rename = "z_fpFluxMean")]
     pub z_fp_flux_mean: Option<f32>,
-    /// Standard error of z_fpFluxMean.
+    /// Standard error of z_fpFluxMean [nJy].
     #[serde(rename = "z_fpFluxMeanErr")]
     pub z_fp_flux_mean_err: Option<f32>,
-    /// Weighted mean point-source model magnitude for y filter.
+    /// Weighted mean point-source model magnitude for y filter [nJy].
     #[serde(rename = "y_psfFluxMean")]
     pub y_psf_flux_mean: Option<f32>,
-    /// Standard error of y_psfFluxMean.
+    /// Standard error of y_psfFluxMean [nJy].
     #[serde(rename = "y_psfFluxMeanErr")]
     pub y_psf_flux_mean_err: Option<f32>,
     /// Chi^2 statistic for the scatter of y_psfFlux around y_psfFluxMean.
     #[serde(rename = "y_psfFluxChi2")]
     pub y_psf_flux_chi2: Option<f32>,
-    /// The number of data points used to compute y_psfFluxChi2.
+    /// The number of y-band data points.
     #[serde(rename = "y_psfFluxNdata")]
     #[serde_as(deserialize_as = "FlexibleOption")]
     pub y_psf_flux_ndata: Option<i32>,
-    /// Weighted mean forced photometry flux for y filter.
+    /// Weighted mean forced photometry flux for y filter [nJy].
     #[serde(rename = "y_fpFluxMean")]
     pub y_fp_flux_mean: Option<f32>,
-    /// Standard error of y_fpFluxMean.
+    /// Standard error of y_fpFluxMean [nJy].
     #[serde(rename = "y_fpFluxMeanErr")]
     pub y_fp_flux_mean_err: Option<f32>,
-    /// Mean of the u band flux errors.
+    /// Mean of the u band flux errors [nJy].
     #[serde(rename = "u_psfFluxErrMean")]
     pub u_psf_flux_err_mean: Option<f32>,
-    /// Mean of the g band flux errors.
+    /// Mean of the g band flux errors [nJy].
     #[serde(rename = "g_psfFluxErrMean")]
     pub g_psf_flux_err_mean: Option<f32>,
-    /// Mean of the r band flux errors.
+    /// Mean of the r band flux errors [nJy].
     #[serde(rename = "r_psfFluxErrMean")]
     pub r_psf_flux_err_mean: Option<f32>,
-    /// Mean of the i band flux errors.
+    /// Mean of the i band flux errors [nJy].
     #[serde(rename = "i_psfFluxErrMean")]
     pub i_psf_flux_err_mean: Option<f32>,
-    /// Mean of the z band flux errors.
+    /// Mean of the z band flux errors [nJy].
     #[serde(rename = "z_psfFluxErrMean")]
     pub z_psf_flux_err_mean: Option<f32>,
-    /// Mean of the y band flux errors.
+    /// Mean of the y band flux errors [nJy].
     #[serde(rename = "y_psfFluxErrMean")]
     pub y_psf_flux_err_mean: Option<f32>,
-    /// Weighted mean forced photometry flux for u filter.
+    /// Weighted mean forced photometry flux for u filter [nJy].
     #[serde(rename = "u_scienceFluxMean")]
     pub u_science_flux_mean: Option<f32>,
-    /// Standard error of u_scienceFluxMean.
+    /// Standard error of u_scienceFluxMean [nJy].
     #[serde(rename = "u_scienceFluxMeanErr")]
     pub u_science_flux_mean_err: Option<f32>,
-    /// Weighted mean forced photometry flux for g filter.
+    /// Weighted mean forced photometry flux for g filter [nJy].
     #[serde(rename = "g_scienceFluxMean")]
     pub g_science_flux_mean: Option<f32>,
-    /// Standard error of g_scienceFluxMean.
+    /// Standard error of g_scienceFluxMean [nJy].
     #[serde(rename = "g_scienceFluxMeanErr")]
     pub g_science_flux_mean_err: Option<f32>,
-    /// Weighted mean forced photometry flux for r filter.
+    /// Weighted mean forced photometry flux for r filter [nJy].
     #[serde(rename = "r_scienceFluxMean")]
     pub r_science_flux_mean: Option<f32>,
-    /// Standard error of r_scienceFluxMean.
+    /// Standard error of r_scienceFluxMean [nJy].
     #[serde(rename = "r_scienceFluxMeanErr")]
     pub r_science_flux_mean_err: Option<f32>,
-    /// Weighted mean forced photometry flux for i filter.
+    /// Weighted mean forced photometry flux for i filter [nJy].
     #[serde(rename = "i_scienceFluxMean")]
     pub i_science_flux_mean: Option<f32>,
-    /// Standard error of i_scienceFluxMean.
+    /// Standard error of i_scienceFluxMean [nJy].
     #[serde(rename = "i_scienceFluxMeanErr")]
     pub i_science_flux_mean_err: Option<f32>,
-    /// Weighted mean forced photometry flux for z filter.
+    /// Weighted mean forced photometry flux for z filter [nJy].
     #[serde(rename = "z_scienceFluxMean")]
     pub z_science_flux_mean: Option<f32>,
-    /// Standard error of z_scienceFluxMean.
+    /// Standard error of z_scienceFluxMean [nJy].
     #[serde(rename = "z_scienceFluxMeanErr")]
     pub z_science_flux_mean_err: Option<f32>,
-    /// Weighted mean forced photometry flux for y filter.
+    /// Weighted mean forced photometry flux for y filter [nJy].
     #[serde(rename = "y_scienceFluxMean")]
     pub y_science_flux_mean: Option<f32>,
-    /// Standard error of y_scienceFluxMean.
+    /// Standard error of y_scienceFluxMean [nJy].
     #[serde(rename = "y_scienceFluxMeanErr")]
     pub y_science_flux_mean_err: Option<f32>,
     /// Time of the first diaSource, expressed as Modified Julian Date, International Atomic Time.
     #[serde(rename = "firstDiaSourceMjdTai")]
-    pub first_dia_source_mjd_tai: f64,
-    /// Last time when non-forced DIASource was seen for this object.
+    pub first_dia_source_mjd_tai: Option<f64>,
+    /// Time of the most recent non-forced DIASource for this object, expressed as Modified Julian Date, International Atomic Time.
     #[serde(rename = "lastDiaSourceMjdTai")]
-    pub last_dia_source_mjd_tai: f64,
-    /// Total number of DiaSources associated with this DiaObject.
+    pub last_dia_source_mjd_tai: Option<f64>,
+    /// Number of DiaSources associated with this DiaObject within the last 12 months.
     #[serde(rename = "nDiaSources")]
     pub n_dia_sources: i32,
 }
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
+#[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
 #[serde(default)]
 pub struct DiaForcedSource {
     /// Unique id.
@@ -731,27 +777,27 @@ pub struct DiaForcedSource {
     /// Id of the DiaObject that this DiaForcedSource was associated with.
     #[serde(rename = "diaObjectId")]
     pub dia_object_id: i64,
-    /// Right ascension coordinate of the position of the DiaObject at time radecMjdTai.
+    /// Right ascension coordinate of the position of the DiaObject [deg].
     pub ra: f64,
-    /// Declination coordinate of the position of the DiaObject at time radecMjdTai.
+    /// Declination coordinate of the position of the DiaObject [deg].
     pub dec: f64,
     /// Id of the visit where this forcedSource was measured.
     pub visit: i64,
     /// Id of the detector where this forcedSource was measured. Datatype short instead of byte because of DB concerns about unsigned bytes.
     pub detector: i32,
-    /// Point Source model flux.
+    /// Point Source model flux [nJy].
     #[serde(rename = "psfFlux")]
     pub psf_flux: Option<f32>,
-    /// Uncertainty of psfFlux.
+    /// Uncertainty of psfFlux [nJy].
     #[serde(rename = "psfFluxErr")]
     pub psf_flux_err: Option<f32>,
-    /// Effective mid-visit time for this diaForcedSource, expressed as Modified Julian Date, International Atomic Time.
+    /// Effective mid-visit time for this diaForcedSource, expressed as Modified Julian Date, International Atomic Time [d].
     #[serde(rename = "midpointMjdTai")]
     pub midpoint_mjd_tai: f64,
-    /// Forced photometry flux for a point source model measured on the visit image centered at the DiaObject position.
+    /// Forced photometry flux for a point source model measured on the visit image centered at the DiaObject position [nJy].
     #[serde(rename = "scienceFlux")]
     pub science_flux: Option<f32>,
-    /// Uncertainty of scienceFlux.
+    /// Uncertainty of scienceFlux [nJy].
     #[serde(rename = "scienceFluxErr")]
     pub science_flux_err: Option<f32>,
     /// Filter band this source was observed with.
@@ -874,7 +920,7 @@ pub struct SsSource {
     /// Predicted ICRS declination from the orbit in mpc_orbits.
     #[serde(rename = "ephDec")]
     pub eph_dec: Option<f64>,
-    /// Predicted magnitude in V band, computed from mpc_orbits data including the mpc_orbits-provided (H, G) estimates.
+    /// Predicted magnitude in V band, computed from mpc_orbits data including the mpc_orbits-provided (H, G) estimates
     #[serde(rename = "ephVmag")]
     pub eph_vmag: Option<f32>,
     /// Total predicted on-sky angular rate of motion.
@@ -929,17 +975,19 @@ pub struct SsSource {
     pub topo_vz: Option<f32>,
     /// The magnitude of the topocentric velocity vector, sqrt(vx*vx + vy*vy + vz*vz).
     pub topo_vtot: Option<f32>,
-    /// The rank of the diaSourceId-identified source in terms of its closeness to the predicted SSO position.
+    /// The rank of the diaSourceId-identified source in terms of its closeness to the predicted SSO position. If diaSourceId is the nearest DiaSource to this SSO prediction, diaSourceDistanceRank=1 would be set. If it is the second nearest, it would be 2, etc.
     #[serde(rename = "diaDistanceRank")]
     pub dia_distance_rank: Option<i32>,
 }
 
-/// Rubin Avro alert schema v11.0 (minus the `mpc_orbits` orbital-elements record, which we do
+/// Rubin Avro alert schema v11.2 (minus the `mpc_orbits` orbital-elements record, which we do
 /// not use here yet)
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct LsstRawAvroAlert {
     #[serde(rename(deserialize = "diaSourceId"))]
     pub candid: i64,
+    pub observation_reason: Option<String>,
+    pub target_name: Option<String>,
     #[serde(rename(deserialize = "diaSource"))]
     pub dia_source: DiaSource,
     #[serde(rename = "prvDiaSources")]
@@ -994,6 +1042,7 @@ where
     let dia_sources = <Vec<DiaSource> as Deserialize>::deserialize(deserializer)?;
     let candidates = dia_sources
         .into_iter()
+        .filter(|dia_source| dia_source.psf_flux.is_none_or(f32::is_finite))
         .map(LsstPrvCandidate::try_from)
         .collect::<Result<Vec<LsstPrvCandidate>, AlertError>>()
         .map_err(serde::de::Error::custom)?;
@@ -1036,6 +1085,8 @@ pub struct LsstObject {
     /// Persists regardless of whether a ZTF cross-match is ever found.
     pub designation: Option<String>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<LsstAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -1067,9 +1118,29 @@ struct AlertAuxForUpdate {
     pub version: Option<i32>,
 }
 
+fn detection_history(
+    prv_candidates: &[LsstPrvCandidate],
+    existing_aux: Option<&AlertAuxForUpdate>,
+    jd: f64,
+) -> (Option<f64>, i32) {
+    let stored = existing_aux
+        .into_iter()
+        .flat_map(|aux| aux.prv_candidates.iter().map(|pc| pc.jd));
+    let mut jds: Vec<f64> = prv_candidates
+        .iter()
+        .map(|pc| pc.jd)
+        .chain(stored)
+        .filter(|pc_jd| pc_jd.is_finite() && *pc_jd <= jd)
+        .collect();
+    jds.sort_by(f64::total_cmp);
+    jds.dedup();
+    (jds.first().copied(), jds.len() as i32)
+}
+
 pub struct LsstAlertWorker {
     schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
@@ -1231,6 +1302,7 @@ impl LsstAlertWorker {
                 // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
                 self.update_aux_fallback(
@@ -1284,6 +1356,11 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
 
+        // Warns rather than fails: a crossmatch catalog that is configured but
+        // empty produces zero matches on every alert, which is
+        // indistinguishable from a genuine non-match.
+        crate::catalogs::warn_on_empty_crossmatch_catalogs(&db, &xmatch_configs).await;
+
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_storage = config
@@ -1305,6 +1382,7 @@ impl AlertWorker for LsstAlertWorker {
                 Some(github_fallback_url.to_string()),
             ),
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -1320,10 +1398,6 @@ impl AlertWorker for LsstAlertWorker {
         Survey::Lsst
     }
 
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", LsstAlertWorker::survey())
-    }
-
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_enrichment_queue", LsstAlertWorker::survey())
     }
@@ -1337,7 +1411,12 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        let candidate = LsstCandidate::new(avro_alert.dia_source, avro_alert.dia_object)?;
+        let mut candidate = LsstCandidate::new(
+            avro_alert.dia_source,
+            avro_alert.dia_object,
+            avro_alert.observation_reason,
+            avro_alert.target_name,
+        )?;
 
         let candid = candidate.dia_source.candid;
         let object_id = candidate.object_id.clone();
@@ -1360,6 +1439,18 @@ impl AlertWorker for LsstAlertWorker {
         LsstPrvCandidate::sanitize_timeseries(&mut prv_candidates);
         LsstForcedPhot::sanitize_timeseries(&mut fp_hists);
 
+        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
+
+        // Rubin's nDiaSources and firstDiaSourceMjdTai only cover the last 12 months
+        let (first_jd, ndethist) =
+            detection_history(&prv_candidates, existing_alert_aux.as_ref(), candidate.jd);
+        candidate.jdstarthist = candidate
+            .jdstarthist
+            .into_iter()
+            .chain(first_jd)
+            .reduce(f64::min);
+        candidate.ndethist = Some(ndethist);
+
         let alert = LsstAlert {
             candid,
             object_id: object_id.clone(),
@@ -1371,13 +1462,12 @@ impl AlertWorker for LsstAlertWorker {
             updated_at: now,
         };
 
-        let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+        if self
+            .check_alert_exists(candid, &self.alert_collection)
             .await
-            .inspect_err(as_error!())?;
-
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+            .inspect_err(as_error!())?
+        {
+            return Ok(ProcessAlertStatus::Exists(candid));
         }
 
         let survey_matches = Some(
@@ -1385,6 +1475,21 @@ impl AlertWorker for LsstAlertWorker {
                 .await
                 .inspect_err(as_error!())?,
         );
+        if let Some(id) = survey_matches
+            .as_ref()
+            .and_then(|a| a.ztf.first())
+            .filter(|_| ss_object_id.is_none())
+        {
+            self.link_counterpart(
+                &self.ztf_alert_aux_collection,
+                id,
+                &object_id,
+                "LSST",
+                "DECAM",
+            )
+            .await
+            .inspect_err(as_error!())?;
+        }
 
         // The designation is only known once a diaSource is linked to an ssObject; keep it
         // current independent of whichever branch below runs, and regardless of any ZTF
@@ -1393,8 +1498,6 @@ impl AlertWorker for LsstAlertWorker {
         // so this only ever folds a `Some` designation into the same write as the
         // lightcurve/aliases update, in every branch below (fresh insert, versioned update, and
         // both DB-only fallbacks) instead of issuing a separate round trip.
-        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
-
         if let Some(existing) = existing_alert_aux {
             self.update_aux(
                 &object_id,
@@ -1417,6 +1520,17 @@ impl AlertWorker for LsstAlertWorker {
                 &self.db,
             )
             .await?;
+            let host_galaxy = host::associate_with_photometry(
+                ra,
+                dec,
+                &xmatches,
+                &self.host_galaxy_config,
+                &self.xmatch_configs,
+                &Survey::Lsst,
+                &object_id,
+                &self.db,
+            )
+            .await;
             let obj = LsstObject {
                 object_id: object_id.clone(),
                 prv_candidates,
@@ -1424,6 +1538,7 @@ impl AlertWorker for LsstAlertWorker {
                 is_sso: ss_object_id.is_some(),
                 designation: designation.clone(),
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
@@ -1431,8 +1546,7 @@ impl AlertWorker for LsstAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                // use the race-condition free fallback update
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );
@@ -1451,15 +1565,20 @@ impl AlertWorker for LsstAlertWorker {
             }
         }
 
+        self.format_and_insert_cutouts(
+            candid,
+            &object_id,
+            avro_alert.cutout_science,
+            avro_alert.cutout_template,
+            avro_alert.cutout_difference,
+            &self.alert_cutout_storage,
+        )
+        .await
+        .inspect_err(as_error!())?;
+
+        // Inserted last: an alert in the database implies its aux and cutouts are there too.
         let status = self
-            .format_and_insert_cutouts(
-                candid,
-                &object_id,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_storage,
-            )
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 
@@ -1655,7 +1774,13 @@ mod tests {
         // validate the alert
         let alert: LsstRawAvroAlert = alert.unwrap();
         assert_eq!(alert.candid, candid);
-        let candidate = LsstCandidate::new(alert.dia_source, alert.dia_object).unwrap();
+        let candidate = LsstCandidate::new(
+            alert.dia_source,
+            alert.dia_object,
+            alert.observation_reason,
+            alert.target_name,
+        )
+        .unwrap();
         assert_eq!(candidate.object_id, object_id);
         assert!((candidate.dia_source.ra - ra).abs() < 1e-6);
         assert!((candidate.dia_source.dec - dec).abs() < 1e-6);
@@ -1848,6 +1973,79 @@ mod tests {
         assert_eq!(ss_source.helio_range, Some(2.5));
         assert_eq!(ss_source.topo_range, None);
         assert_eq!(ss_source.dia_distance_rank, Some(1));
+    }
+
+    #[test]
+    fn test_dia_source_v11_1_fields_from_avro_value() {
+        use apache_avro::{from_value, types::Value};
+
+        let value = Value::Record(vec![
+            ("diaSourceId".to_string(), Value::Long(123456789)),
+            (
+                "exposureTime".to_string(),
+                Value::Union(1, Box::new(Value::Float(30.0))),
+            ),
+            (
+                "trail_flag".to_string(),
+                Value::Union(1, Box::new(Value::Boolean(true))),
+            ),
+            (
+                "trailAlgorithm".to_string(),
+                Value::Union(1, Box::new(Value::Int(2))),
+            ),
+            (
+                "reliabilityVersion".to_string(),
+                Value::Union(1, Box::new(Value::String("0.3".to_string()))),
+            ),
+        ]);
+
+        let dia_source: DiaSource = from_value(&value).expect("failed to deserialize DiaSource");
+        assert_eq!(dia_source.exposure_time, Some(30.0));
+        assert_eq!(dia_source.trail_flag, Some(true));
+        assert_eq!(dia_source.trail_algorithm, Some(2));
+        assert_eq!(dia_source.reliability_version, Some("0.3".to_string()));
+        assert_eq!(dia_source.template_instrument, None);
+        assert_eq!(dia_source.mixed_instruments, None);
+    }
+
+    #[test]
+    fn test_dia_source_v11_2_fields_from_avro_value() {
+        use apache_avro::{from_value, types::Value};
+
+        let value = Value::Record(vec![
+            ("diaSourceId".to_string(), Value::Long(123456789)),
+            (
+                "pixelFlags_spike".to_string(),
+                Value::Union(1, Box::new(Value::Boolean(true))),
+            ),
+            (
+                "templateMjdMean".to_string(),
+                Value::Union(1, Box::new(Value::Double(56000.5))),
+            ),
+            (
+                "templateMjdMin".to_string(),
+                Value::Union(1, Box::new(Value::Double(55000.0))),
+            ),
+            (
+                "templateMjdMax".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "templateInstrument".to_string(),
+                Value::String("DECam".to_string()),
+            ),
+            ("templateVersion".to_string(), Value::Int(1)),
+            ("mixedInstruments".to_string(), Value::Boolean(true)),
+        ]);
+
+        let dia_source: DiaSource = from_value(&value).expect("failed to deserialize DiaSource");
+        assert_eq!(dia_source.pixel_flags_spike, Some(true));
+        assert_eq!(dia_source.template_mjd_mean, Some(56000.5));
+        assert_eq!(dia_source.template_mjd_min, Some(55000.0));
+        assert_eq!(dia_source.template_mjd_max, None);
+        assert_eq!(dia_source.template_instrument, Some("DECam".to_string()));
+        assert_eq!(dia_source.template_version, Some(1));
+        assert_eq!(dia_source.mixed_instruments, Some(true));
     }
 
     #[tokio::test]

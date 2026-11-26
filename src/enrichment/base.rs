@@ -1,16 +1,17 @@
 use crate::{
     conf::{self, AppConfig},
     enrichment::models::{ModelError, SharedModels},
-    scheduler::record_worker_retry,
+    scheduler::{count_enriched_alerts, record_worker_retry},
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
         fits::CutoutError,
+        ingest_stats,
         o11y::metrics::SCHEDULER_METER,
         retry::{
             is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
         },
-        worker::{should_terminate, WorkerCmd},
+        worker::{should_terminate, WorkerCmd, WorkerQueues},
     },
 };
 
@@ -77,6 +78,8 @@ pub enum EnrichmentWorkerError {
     CutoutAccessError(#[from] CutoutError),
     #[error("json serialization error")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("could not determine which models and derivations are running")]
+    EnrichmentVersion(#[from] crate::enrichment::version::VersionError),
     #[error("failed to deserialize from MongoDB")]
     MongoDeserializeError(#[from] mongodb::bson::de::Error),
     #[error("missing cutouts for candid {0}")]
@@ -97,6 +100,8 @@ pub enum EnrichmentWorkerError {
     MissingFluxPSF,
     #[error("Empty lightcurve after preparation for candid {0}")]
     EmptyLightcurve(i64),
+    #[error("milvus error")]
+    Milvus(#[from] crate::milvus::MilvusError),
 }
 
 #[async_trait::async_trait]
@@ -117,6 +122,15 @@ pub trait EnrichmentWorker {
 
     /// Forcibly disable Babamul on this worker, regardless of config.
     fn disable_babamul(&mut self);
+
+    fn write_only(&mut self, _properties: Vec<String>, _gp_fit: bool) -> bool {
+        false
+    }
+
+    /// Called when the input queue comes up empty, before the worker sleeps.
+    /// Background catch-up that would otherwise compete with live batches
+    /// belongs here. Must not fail: an idle worker has nothing to report.
+    async fn on_idle(&mut self) {}
 }
 
 /// Fetch alerts from the database given a list of candids and an aggregation pipeline.
@@ -164,11 +178,12 @@ pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
 #[tokio::main]
 // No `#[instrument]`: this is the long-lived enrichment worker loop; a
 // wrapping span would put every per-alert span under a single root trace.
-pub async fn run_enrichment_worker<T: EnrichmentWorker>(
+pub async fn run_enrichment_worker<T: EnrichmentWorker + Send>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
     shared_models: Option<Arc<SharedModels>>,
+    queues: WorkerQueues,
 ) -> Result<(), EnrichmentWorkerError> {
     debug!(?config_path);
     let mut enrichment_worker = T::new(config_path, shared_models).await?;
@@ -181,9 +196,14 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         .ok_or(EnrichmentWorkerError::WorkerConfigMissing(survey.clone()))?;
 
     let con = config.build_redis().await?;
+    let stats_db = config.build_db().await?;
 
-    let input_queue = enrichment_worker.input_queue_name();
-    let output_queue = enrichment_worker.output_queue_name();
+    let input_queue = queues
+        .input
+        .unwrap_or_else(|| enrichment_worker.input_queue_name());
+    let output_queue = queues
+        .output
+        .unwrap_or_else(|| enrichment_worker.output_queue_name());
     let survey = input_queue
         .split('_')
         .next()
@@ -192,6 +212,14 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
 
     let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
+
+    // One inference batch per pull; more would cost a second, mostly-padded GPU pass.
+    let batch_size = NonZero::new(worker_config.enrichment.batch_size).ok_or_else(|| {
+        EnrichmentWorkerError::ConfigurationError(format!(
+            "enrichment batch_size must be non-zero for survey {}",
+            survey
+        ))
+    })?;
 
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let survey_attr = KeyValue::new("survey", survey.clone());
@@ -235,12 +263,9 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             is_transient_redis_error,
             || record_worker_retry("enrichment", &survey, "valkey_rpop"),
             || {
-                // Clone the (cheaply-clonable) multiplexed connection so the
-                // future owns it, rather than borrowing `con` through the
-                // FnMut closure.
                 let mut con = con.clone();
                 let key: &str = &input_queue;
-                async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(1000)).await }
+                async move { con.rpop::<&str, Vec<i64>>(key, Some(batch_size)).await }
             },
         )
         .await
@@ -250,7 +275,9 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         })?;
 
         if candids.is_empty() {
+            debug!(queue = %input_queue, "queue empty, sleeping 500ms");
             ACTIVE.add(-1, &active_attrs);
+            enrichment_worker.on_idle().await;
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
@@ -265,12 +292,14 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
+        ingest_stats::record_processed(&con, &stats_db, &survey, &candids).await;
 
         if processed_alerts.is_empty() {
             let attributes = &ok_attrs;
             ACTIVE.add(-1, &active_attrs);
             BATCH_PROCESSED.add(1, attributes);
             ALERT_PROCESSED.add(candids.len() as u64, attributes);
+            count_enriched_alerts(candids.len());
             continue;
         }
         retry_transient(
@@ -296,6 +325,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         ACTIVE.add(-1, &active_attrs);
         BATCH_PROCESSED.add(1, attributes);
         ALERT_PROCESSED.add(candids.len() as u64, attributes);
+        count_enriched_alerts(candids.len());
     }
 
     Ok(())

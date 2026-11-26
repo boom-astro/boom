@@ -41,6 +41,9 @@ kafka:
     winter:
       server: "localhost:9092"
       group_id: "test" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
+    askap:
+      server: "localhost:9092"
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__ASKAP__GROUP_ID environment variable
     roman:
       server: "localhost:9092"
       group_id: "test" # Set via BOOM_KAFKA__CONSUMER__ROMAN__GROUP_ID environment variable
@@ -56,6 +59,10 @@ cutouts_storage:
   username: mongoadmin
   password: mongoadminsecret
   srv: false
+milvus:
+  # A test-only collection, so no test run can touch the one production searches.
+  collection:
+    name: boom_ztf_fusion_embeddings_test
 workers:
   ztf:
     command_interval: 500
@@ -101,6 +108,19 @@ workers:
       refresh_interval_minutes: 15
       max_match_rate: 5
       reference_night:
+      reference_window_days: 30
+  askap:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
+      reference_window_days: 30
   roman:
     command_interval: 500
     alert:
@@ -114,7 +134,7 @@ workers:
       reference_night:
 crossmatch:
   ztf:
-    - catalog: PS1_DR1
+    PS1_DR1:
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -131,7 +151,7 @@ crossmatch:
         yMeanPSFMagErr: 1
         ra: 1
         dec: 1
-    - catalog: Gaia_DR3
+    Gaia_DR3:
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -143,7 +163,7 @@ crossmatch:
         phot_rp_mean_mag: 1
         ra: 1
         dec: 1
-    - catalog: milliquas_v6
+    milliquas_v6:
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -153,7 +173,7 @@ crossmatch:
         Qpct: 1
         ra: 1
         dec: 1
-    - catalog: NED
+    NED:
       radius: 300.0 # 300 arcseconds
       use_distance: true
       distance_key: "z"
@@ -177,7 +197,7 @@ crossmatch:
         Mstar: 1
         Mstar_unc: 1
   lsst:
-    - catalog: LSPSC
+    LSPSC:
       radius: 30.0 # 30 arcseconds
       use_distance: false
       projection:
@@ -185,8 +205,9 @@ crossmatch:
         ra: 1
         dec: 1
         score: 1
-        magwhite: 1
+        mag_white: 1
       max_results: 3
-  decam: []
-  winter: []
-  roman: []
+  decam: {}
+  winter: {}
+  askap: {}
+  roman: {}

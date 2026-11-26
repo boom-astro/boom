@@ -2,7 +2,7 @@ import { useState, useEffect, Suspense } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight } from "lucide-react";
 import { fetchTopics, fetchSchema, type TopicInfo, type AvroSchema } from "@/lib/api";
-import { SURVEYS } from "@/lib/utils";
+import { SURVEYS } from "@/lib/constants";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog.tsx";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";

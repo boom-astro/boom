@@ -1,22 +1,3 @@
-//! Roman / RAPID alert ingestion.
-//!
-//! RAPID (the Roman Alerts Production and Investigation of Discoveries pipeline)
-//! publishes difference-image alerts whose schema closely follows Rubin's:
-//! a triggering `diaSource`, the object's previous `diaSource`s, optional forced
-//! photometry, an object-level `diaObject` summary, and three FITS cutouts.
-//!
-//! Differences from LSST that matter here:
-//!   - times are UTC MJD (not TAI), so `jd = mjd + 2400000.5`
-//!   - the packets are Avro object container files with an embedded schema
-//!     (like ZTF/DECam), not Confluent-framed payloads with a schema registry
-//!   - aperture photometry, science/reference forced photometry and
-//!     `diffimglimmag` are schema stubs that are currently always null, so the
-//!     candidate is built from PSF photometry alone
-//!   - the sign of the detection is carried by `isNegative` rather than by the
-//!     sign of `psfFlux` (RAPID reports the absolute flux)
-//!   - solar-system associations arrive as an `ssMatches` array of designations
-//!     rather than as an `ssObjectId`
-
 use std::collections::HashMap;
 
 use crate::{
@@ -48,13 +29,8 @@ use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "ROMAN";
-/// Roman observes from Sun-Earth L2, so unlike ground-based surveys it is not
-/// declination limited; the RAPID time-domain surveys just target specific
-/// fields.
 pub const ROMAN_DEC_RANGE: (f64, f64) = (-90.0, 90.0);
-/// One WFI pixel (0.11 arcsec/pixel). The per-source centroid errors in the
-/// packets are a few hundredths of a pixel, so a pixel is a conservative
-/// cross-match radius against other surveys.
+/// One WFI pixel.
 pub const ROMAN_POSITION_UNCERTAINTY: f64 = 0.11; // arcsec
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
@@ -112,8 +88,7 @@ pub struct RomanDiaSource {
     pub dec_err: Option<f32>,
     /// Filter band this source was observed with.
     pub band: Option<Band>,
-    /// Flux from PSF-fit on difference image [nJy]. RAPID reports the absolute
-    /// value; the sign of the detection is in `is_negative`.
+    /// PSF flux on the difference image, negative for a negative detection [nJy].
     #[serde(rename = "psfFlux")]
     pub psf_flux: Option<f32>,
     /// Uncertainty in psfFlux [nJy].
@@ -258,31 +233,21 @@ impl RomanDiaSource {
         }
     }
 
-    /// PSF magnitude, its uncertainty, the limiting magnitude and the SNR,
-    /// derived from the nJy difference-image PSF flux.
     fn psf_photometry(&self) -> Result<(f32, f32, f32, f32), AlertError> {
         let psf_flux = self.psf_flux.ok_or(AlertError::MissingFluxPSF)?.abs();
         let psf_flux_err = self.psf_flux_err.ok_or(AlertError::MissingFluxPSFError)?;
 
         let (magpsf, sigmapsf) = flux2mag(psf_flux, psf_flux_err, ROMAN_ZP_AB_NJY);
-        // `diffimglimmag` is a schema stub today, so fall back to the flux error.
         let diffmaglim = self
             .diffimglimmag
             .unwrap_or_else(|| fluxerr2diffmaglim(psf_flux_err, ROMAN_ZP_AB_NJY));
-        // RAPID already provides snr = psfFlux / psfFluxErr; recompute it when absent.
         let snr_psf = self.snr.unwrap_or(psf_flux / psf_flux_err);
 
         Ok((magpsf, sigmapsf, diffmaglim, snr_psf))
     }
 }
 
-/// A Roman detection with the magnitudes derived from its nJy PSF flux.
-///
-/// This covers both the triggering detection and the historical ones: only the
-/// triggering detection's packet carries a `diaObject` summary, so
-/// `jdstarthist`/`ndethist` are `None` on historical points. (Unlike the other
-/// surveys there is no separate `PrvCandidate` type: one type keeps the stored
-/// documents and the published filter schema exactly in step.)
+/// A Roman detection; `jdstarthist` and `ndethist` are only set on the triggering one.
 #[serde_as]
 #[skip_serializing_none]
 #[serdavro]
@@ -296,8 +261,7 @@ pub struct RomanCandidate {
     pub magpsf: f32,
     pub sigmapsf: f32,
     pub snr_psf: f32,
-    /// Reduced chi^2 of the PSF fit, named to match the equivalent ZTF/LSST
-    /// filtering field.
+    /// Reduced chi^2 of the PSF fit.
     pub chipsf: Option<f32>,
     pub diffmaglim: f32,
     pub isdiffpos: bool,
@@ -307,9 +271,13 @@ pub struct RomanCandidate {
 
 impl RomanCandidate {
     fn new(
-        dia_source: RomanDiaSource,
+        mut dia_source: RomanDiaSource,
         dia_object: Option<RomanDiaObject>,
     ) -> Result<Self, AlertError> {
+        // RAPID reports |psfFlux| and carries the sign in isNegative.
+        if dia_source.is_negative {
+            dia_source.psf_flux = dia_source.psf_flux.map(|flux| -flux.abs());
+        }
         let object_id = dia_source.object_id()?;
         let (magpsf, sigmapsf, diffmaglim, snr_psf) = dia_source.psf_photometry()?;
 
@@ -350,16 +318,10 @@ impl TimeSeries for RomanCandidate {
     }
 }
 
-/// Object-level summary of a Roman DIA object.
-///
-/// The packet also carries per-band PSF flux summary statistics
-/// (`<band>PsfFluxMean` and friends). Those are not modelled here: the object
-/// record is only used to seed `jdstarthist`/`ndethist` on the candidate and is
-/// not persisted, and the equivalent statistics are recomputed from the stored
-/// lightcurve during enrichment.
+/// Only read for `jdstarthist` and `ndethist`; never stored.
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
 #[serde(default)]
 pub struct RomanDiaObject {
     /// Unique identifier for this object.
@@ -401,27 +363,6 @@ pub struct RomanDiaObject {
     /// MJD of the latest exposure in the reference image (stub).
     #[serde(rename = "lastRefMjd")]
     pub last_ref_mjd: Option<f64>,
-}
-
-impl Default for RomanDiaObject {
-    fn default() -> Self {
-        RomanDiaObject {
-            dia_object_id: 0,
-            ra0: 0.0,
-            dec0: 0.0,
-            mean_ra: None,
-            mean_dec: None,
-            ra_err: None,
-            dec_err: None,
-            n_dia_sources: 0,
-            first_dia_source_mjd: None,
-            last_dia_source_mjd: None,
-            validity_start_mjd: 0.0,
-            ncovhist: None,
-            first_ref_mjd: None,
-            last_ref_mjd: None,
-        }
-    }
 }
 
 /// Forced photometry at the object position on a difference image.
@@ -478,8 +419,6 @@ impl TryFrom<RomanDiaForcedSource> for RomanForcedPhot {
             .psf_flux_err
             .ok_or(AlertError::MissingFluxPSFError)?;
 
-        // Only points above the SNR threshold count as detections. Forced
-        // photometry keeps the sign of the flux (there is no `isNegative` here).
         let (magpsf, sigmapsf, isdiffpos, snr_psf) = match dia_forced_source.psf_flux {
             Some(psf_flux) => {
                 let psf_flux_abs = psf_flux.abs();
@@ -572,8 +511,7 @@ pub struct RomanRawAvroAlert {
     pub target_name: Option<String>,
 }
 
-/// Roman times are UTC MJD, so the conversion to JD is a plain offset (no
-/// TAI/UTC leap-second handling, unlike LSST).
+/// RAPID times are UTC, not TAI like Rubin's.
 fn mjd_to_jd(mjd: f64) -> f64 {
     mjd + 2400000.5
 }
@@ -588,8 +526,7 @@ where
     }
 }
 
-/// Cutouts are nullable in the schema, but an alert without them cannot be
-/// served downstream, so treat a missing cutout as a decode failure.
+/// Nullable in the RAPID schema, but required downstream.
 fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
@@ -672,7 +609,6 @@ pub struct RomanAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: RomanCandidate,
-    /// Known solar-system objects matching this source position, if any.
     pub ss_matches: Vec<RomanSsMatch>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -830,10 +766,9 @@ impl RomanAlertWorker {
         {
             Ok(_) => Ok(()),
             Err(e) => {
-                // if we get a concurrent modification error or an error preparing the lightcurves update,
-                // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
                 self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
@@ -892,10 +827,6 @@ impl AlertWorker for RomanAlertWorker {
         Survey::Roman
     }
 
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", RomanAlertWorker::survey())
-    }
-
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_enrichment_queue", RomanAlertWorker::survey())
     }
@@ -903,7 +834,7 @@ impl AlertWorker for RomanAlertWorker {
     #[instrument(skip_all, err)]
     async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let mut avro_alert: RomanRawAvroAlert = self
+        let avro_alert: RomanRawAvroAlert = self
             .schema_cache
             .alert_from_avro_bytes(avro_bytes)
             .inspect_err(as_error!())?;
@@ -914,20 +845,13 @@ impl AlertWorker for RomanAlertWorker {
         let object_id = candidate.object_id.clone();
         let ra = candidate.dia_source.ra;
         let dec = candidate.dia_source.dec;
-        let ss_matches = avro_alert.ss_matches.take().unwrap_or_default();
-        // Either a match against a known object, or a moving-object candidate
-        // flagged by RAPID.
+        let ss_matches = avro_alert.ss_matches.unwrap_or_default();
         let is_sso = !ss_matches.is_empty() || candidate.dia_source.is_ss_candidate == Some(true);
 
-        let mut prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
-        let mut fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
+        let mut prv_candidates = avro_alert.prv_candidates.unwrap_or_default();
+        prv_candidates.push(candidate.clone());
+        let mut fp_hists = avro_alert.fp_hists.unwrap_or_default();
 
-        // Add the current candidate as the last point in the prv_candidates, if it's not already there (based on jd)
-        if !prv_candidates.iter().any(|pc| pc.jd == candidate.jd) {
-            prv_candidates.push(candidate.clone());
-        }
-
-        // Sort and deduplicate time series data by jd
         RomanCandidate::sanitize_timeseries(&mut prv_candidates);
         RomanForcedPhot::sanitize_timeseries(&mut fp_hists);
 
@@ -941,13 +865,12 @@ impl AlertWorker for RomanAlertWorker {
             updated_at: now,
         };
 
-        let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+        if self
+            .check_alert_exists(candid, &self.alert_collection)
             .await
-            .inspect_err(as_error!())?;
-
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+            .inspect_err(as_error!())?
+        {
+            return Ok(ProcessAlertStatus::Exists(candid));
         }
 
         let survey_matches = Some(
@@ -992,8 +915,7 @@ impl AlertWorker for RomanAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                // use the race-condition free fallback update
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );
@@ -1011,15 +933,19 @@ impl AlertWorker for RomanAlertWorker {
             }
         }
 
+        self.format_and_insert_cutouts(
+            candid,
+            &object_id,
+            avro_alert.cutout_science,
+            avro_alert.cutout_reference,
+            avro_alert.cutout_difference,
+            &self.alert_cutout_storage,
+        )
+        .await
+        .inspect_err(as_error!())?;
+
         let status = self
-            .format_and_insert_cutouts(
-                candid,
-                &object_id,
-                avro_alert.cutout_science,
-                avro_alert.cutout_reference,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_storage,
-            )
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 
@@ -1200,8 +1126,6 @@ mod tests {
         }
     }
 
-    /// Decoding needs no database, so this exercises the packet -> struct path on
-    /// its own.
     #[tokio::test]
     async fn test_roman_alert_from_avro_bytes() {
         let mut schema_cache = SchemaCache::default();
@@ -1216,36 +1140,27 @@ mod tests {
         assert_eq!(alert.candid, candid);
         assert_eq!(alert.schema_version.as_deref(), Some("00.02"));
 
-        // the wide filter is reported as W146 in the packets, and normalized to F146
         assert_eq!(alert.dia_source.band.clone().unwrap(), Band::F146);
 
         let prv_candidates = alert.prv_candidates.clone().unwrap();
         assert_eq!(prv_candidates.len(), 27);
-        // prv sources carry the same objectId as the triggering source
         assert!(prv_candidates.iter().all(|pc| pc.object_id == object_id));
 
         let candidate = RomanCandidate::new(alert.dia_source, alert.dia_object).unwrap();
         assert_eq!(candidate.object_id, object_id);
         assert!((candidate.dia_source.ra - ra).abs() < 1e-6);
         assert!((candidate.dia_source.dec - dec).abs() < 1e-6);
-        // UTC MJD 61679.30210648148 -> JD
         assert!((candidate.jd - 2461679.80210648).abs() < 1e-6);
-        // nJy PSF flux against the AB nJy zeropoint
         assert!((candidate.magpsf - 24.825713).abs() < 1e-4);
         assert!((candidate.sigmapsf - 0.050215).abs() < 1e-5);
         assert!((candidate.snr_psf - 21.621889).abs() < 1e-5);
-        // `diffimglimmag` is a stub, so diffmaglim comes from the flux error
         assert!((candidate.diffmaglim - 26.415522).abs() < 1e-4);
-        // RAPID reports absolute flux, so the sign comes from isNegative
         assert_eq!(candidate.isdiffpos, true);
-        // ndethist/jdstarthist come from the diaObject summary
         assert_eq!(candidate.ndethist, Some(28));
         assert!((candidate.jdstarthist.unwrap() - 2461679.80210648).abs() < 1e-6);
-        // aperture/science/reference photometry are schema stubs for now
         assert!(candidate.dia_source.ap_flux.is_none());
         assert!(candidate.dia_source.science_flux.is_none());
 
-        // forced photometry and solar-system matches are empty in this packet
         assert!(alert.fp_hists.is_none());
         assert!(alert.ss_matches.is_none());
 

@@ -1,0 +1,338 @@
+//! Scoring an alert position against a gravitational-wave localization.
+//!
+//! The credible level is not expressible as a database stage: it needs the
+//! skymap's per-pixel probability density and, in three dimensions, a distance
+//! for the alert. So a query narrows candidates with the localization's MOC and
+//! the exact level is computed here over what comes back.
+
+use crate::utils::spatial::get_f64_from_doc;
+use crate::utils::{
+    cosmology::luminosity_distance_mpc,
+    moc::{CredibleVolumeIndex, LIGO3dskymap},
+};
+use mongodb::bson::Document;
+
+/// Host-galaxy redshifts from an alert's `cross_matches`, best-first and
+/// deduplicated by 3-arcsec proximity so one galaxy isn't counted per catalog.
+///
+/// Priority: 0 = DESI spec (zwarn=0), 1 = NED SPEC, 2 = DESI spec (zwarn!=0)
+/// and LSDR10 spec, 3 = NED PHOT, 4 = LSDR10 photo-z.
+pub fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
+    /// `priority` ranks a row (lower = better) or returns None to skip it.
+    fn extract_catalog_zs(
+        cross_matches: Option<&Document>,
+        catalog: &str,
+        z_field: &str,
+        priority: impl Fn(&Document) -> Option<u8>,
+        ranked: &mut Vec<(u8, f64, f64, f64)>,
+    ) {
+        let Some(arr) = cross_matches.and_then(|cm| cm.get_array(catalog).ok()) else {
+            return;
+        };
+        for v in arr {
+            let Some(m) = v.as_document() else { continue };
+            let Some(p) = priority(m) else { continue };
+            // Document::get_f64 rejects the Int32 these catalogs sometimes store.
+            let Some(z) = get_f64_from_doc(m, z_field).filter(|&z| z > 0.0) else {
+                continue;
+            };
+            let Some(ra) = get_f64_from_doc(m, "ra") else {
+                continue;
+            };
+            let Some(dec) = get_f64_from_doc(m, "dec") else {
+                continue;
+            };
+            ranked.push((p, ra, dec, z));
+        }
+    }
+
+    let mut ranked: Vec<(u8, f64, f64, f64)> = Vec::new(); // (priority, ra, dec, z)
+
+    extract_catalog_zs(
+        cross_matches,
+        "DESI_DR1",
+        "z",
+        |m| {
+            if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
+                return None;
+            }
+            Some(if get_f64_from_doc(m, "zwarn").unwrap_or(1.0) == 0.0 {
+                0
+            } else {
+                2
+            })
+        },
+        &mut ranked,
+    );
+    extract_catalog_zs(
+        cross_matches,
+        "NED",
+        "z",
+        |m| {
+            Some(
+                if m.get_str("z_tech").map(|s| s == "SPEC").unwrap_or(false) {
+                    1
+                } else {
+                    3
+                },
+            )
+        },
+        &mut ranked,
+    );
+    // A Legacy row carrying both is deduplicated below, keeping the spectroscopic one.
+    extract_catalog_zs(cross_matches, "LSDR10", "z_spec", |_| Some(2), &mut ranked);
+    extract_catalog_zs(
+        cross_matches,
+        "LSDR10",
+        "z_phot_median",
+        |_| Some(4),
+        &mut ranked,
+    );
+
+    ranked.sort_by_key(|&(p, _, _, _)| p);
+    const DEDUP_ARCSEC: f64 = 3.0;
+    let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
+    for (_, ra, dec, z) in ranked {
+        let is_dup = kept.iter().any(|&(kra, kdec, _)| {
+            let dra = (ra - kra) * dec.to_radians().cos();
+            let ddec = dec - kdec;
+            (dra * dra + ddec * ddec).sqrt() * 3600.0 < DEDUP_ARCSEC
+        });
+        if !is_dup {
+            kept.push((ra, dec, z));
+        }
+    }
+    kept.into_iter().map(|(_, _, z)| z).collect()
+}
+
+/// Credible level of an alert position, or `None` when nothing places it.
+///
+/// Uses the host redshift, since a position's level is only meaningful at a
+/// distance; the best (smallest) over the hosts is taken, as a single galaxy
+/// among several is enough to place the alert inside the volume. `None` means
+/// undetermined, not outside: an alert with no host has only the 2D test, which
+/// the caller has already applied through the MOC.
+pub fn credible_level_at(
+    skymap: &LIGO3dskymap,
+    idx: &CredibleVolumeIndex,
+    ra: f64,
+    dec: f64,
+    host_galaxy: Option<&Document>,
+    cross_matches: Option<&Document>,
+) -> Option<f64> {
+    best_credible_level(
+        skymap,
+        idx,
+        ra,
+        dec,
+        &host_redshift_ranges(host_galaxy, cross_matches),
+        luminosity_distance_mpc,
+    )
+}
+
+pub fn best_credible_level(
+    skymap: &LIGO3dskymap,
+    idx: &CredibleVolumeIndex,
+    ra: f64,
+    dec: f64,
+    z_ranges: &[(f64, f64)],
+    mut distance_mpc: impl FnMut(f64) -> f64,
+) -> Option<f64> {
+    let best = z_ranges
+        .iter()
+        .filter_map(|&(z_low, z_high)| {
+            let d_low = distance_mpc(z_low);
+            let d_high = if z_high > z_low {
+                distance_mpc(z_high)
+            } else {
+                d_low
+            };
+            idx.best_searched_prob_vol_between(skymap, ra, dec, d_low, d_high)
+        })
+        .fold(f64::INFINITY, f64::min);
+    best.is_finite().then_some(best)
+}
+
+pub const MIN_HOST_POSTERIOR: f64 = 0.5;
+pub const HOST_Z_ERR_SIGMAS: f64 = 2.0;
+
+/// The redshift ranges to place the alert at.
+///
+/// A directional-light-radius association names the galaxy the transient sits
+/// in, so where it is reliable its redshift range is the only one worth trying.
+/// Otherwise nothing says which neighbour is the host, and the level is taken
+/// at whichever catalogued redshift places the alert deepest in the volume --
+/// an upper bound on how well it fits, over every galaxy that could be the host.
+pub fn host_redshift_ranges(
+    host_galaxy: Option<&Document>,
+    cross_matches: Option<&Document>,
+) -> Vec<(f64, f64)> {
+    let best_host = host_galaxy.and_then(|h| h.get_document("best_host").ok());
+    let host_range = best_host.and_then(|b| {
+        let z = get_f64_from_doc(b, "z").filter(|&z| z > 0.0)?;
+        let half_width = HOST_Z_ERR_SIGMAS
+            * get_f64_from_doc(b, "z_err")
+                .filter(|&z_err| z_err > 0.0)
+                .unwrap_or(0.0);
+        Some(((z - half_width).max(0.0), z + half_width))
+    });
+    let reliable = best_host
+        .and_then(|b| get_f64_from_doc(b, "posterior"))
+        .is_some_and(|posterior| posterior >= MIN_HOST_POSTERIOR);
+    match host_range {
+        Some(range) if reliable => vec![range],
+        _ => extract_host_redshifts(cross_matches)
+            .into_iter()
+            .map(|z| (z, z))
+            .chain(host_range)
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::moc::parse_3d_skymap;
+    use mongodb::bson::doc;
+
+    /// A position deep in the localization, at a distance the map likes, scores
+    /// a low credible level; the same position with no host scores nothing.
+    #[test]
+    fn test_a_host_places_the_alert_in_the_volume() {
+        let skymap =
+            parse_3d_skymap("./data/S240618ah_bayestar.fits").expect("the test skymap parses");
+        let idx = CredibleVolumeIndex::build(&skymap, 200);
+
+        // The highest-probability pixel that carries a usable distance fit.
+        let best = skymap
+            .prob
+            .iter()
+            .enumerate()
+            .filter(|&(i, &p)| {
+                p > 0.0 && skymap.distsigma[i].is_finite() && skymap.distsigma[i] > 0.0
+            })
+            .max_by(|a, b| a.1.partial_cmp(b.1).expect("probabilities compare"))
+            .map(|(i, _)| i)
+            .expect("the map has a usable pixel");
+        let uniq = skymap.uniq[best];
+        let (order, ipix) = (
+            crate::utils::moc::uniq_to_order(uniq),
+            crate::utils::moc::uniq_to_ipix(uniq),
+        );
+        let (lon, lat) = cdshealpix::nested::center(order, ipix);
+        let (ra, dec) = (lon.to_degrees(), lat.to_degrees());
+
+        // The redshift whose luminosity distance matches the pixel's own estimate.
+        let d_mpc = skymap.distmu[best];
+        assert!(d_mpc.is_finite() && d_mpc > 0.0, "the pixel has a distance");
+        let z = {
+            let (mut lo, mut hi) = (1e-4, 1.0);
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if luminosity_distance_mpc(mid) < d_mpc {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            0.5 * (lo + hi)
+        };
+
+        let with_host = doc! { "NED": [ doc! { "ra": ra, "dec": dec, "z": z, "z_tech": "SPEC" } ] };
+        let level = credible_level_at(&skymap, &idx, ra, dec, None, Some(&with_host))
+            .expect("a host places the alert");
+        assert!(
+            (0.0..=1.0).contains(&level),
+            "credible level {level} is out of range"
+        );
+        assert!(
+            level < 0.9,
+            "the peak pixel should be well inside, got {level}"
+        );
+
+        // No cross-matches at all: nothing to place it with.
+        assert!(credible_level_at(&skymap, &idx, ra, dec, None, None).is_none());
+
+        let far_host = |z_err: f64| {
+            doc! { "best_host": doc! { "z": 2.0 * z, "z_err": z_err, "posterior": 0.9 } }
+        };
+        let at_far_z = credible_level_at(&skymap, &idx, ra, dec, Some(&far_host(0.0)), None)
+            .expect("the host places the alert");
+        let over_range = credible_level_at(&skymap, &idx, ra, dec, Some(&far_host(0.5 * z)), None)
+            .expect("the host places the alert");
+        assert!(
+            over_range < at_far_z,
+            "a range reaching the pixel's distance should beat its far end, got {over_range} and {at_far_z}"
+        );
+        assert!(
+            (over_range - level).abs() < 1e-3,
+            "the range holds the pixel's distance, so it should score like it: {over_range} vs {level}"
+        );
+    }
+
+    /// A directional-light-radius association names the host, so its redshift is
+    /// used alone: the catalogue sweep would otherwise take whichever neighbour
+    /// places the alert deepest in the volume, which is a different question.
+    #[test]
+    fn test_the_dlr_host_overrides_the_catalogue_sweep() {
+        let cross_matches = doc! {
+            "NED": [ doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" } ]
+        };
+        let host = |posterior: f64| {
+            doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2, "posterior": posterior } }
+        };
+
+        assert_eq!(
+            host_redshift_ranges(Some(&host(0.9)), Some(&cross_matches)),
+            vec![(0.2, 0.2)],
+            "the associated host's redshift should be the only one tried"
+        );
+        assert_eq!(
+            host_redshift_ranges(Some(&host(0.1)), Some(&cross_matches)),
+            vec![(0.05, 0.05), (0.2, 0.2)],
+            "an unreliable host should join the sweep, not replace it"
+        );
+        // And without an association every catalogued redshift is a candidate.
+        assert_eq!(
+            host_redshift_ranges(None, Some(&cross_matches)),
+            vec![(0.05, 0.05)],
+            "the sweep should still run when nothing is associated"
+        );
+    }
+
+    #[test]
+    fn test_the_host_range_spans_its_redshift_error() {
+        let host = |z_err: f64| {
+            doc! { "best_host": doc! { "z": 0.25, "z_err": z_err, "posterior": 0.9 } }
+        };
+        assert_eq!(
+            host_redshift_ranges(Some(&host(0.0625)), None),
+            vec![(0.125, 0.375)]
+        );
+        assert_eq!(
+            host_redshift_ranges(Some(&host(0.25)), None),
+            vec![(0.0, 0.75)],
+            "the range should stop at zero redshift"
+        );
+    }
+
+    /// An association that never found a galaxy, or one carrying no redshift,
+    /// must not suppress the sweep -- that would lose the only distance there is.
+    #[test]
+    fn test_a_hostless_association_falls_back_to_the_sweep() {
+        let cross_matches = doc! {
+            "NED": [ doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" } ]
+        };
+        for host in [
+            doc! {},
+            doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0 } },
+            doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.0 } },
+        ] {
+            assert_eq!(
+                host_redshift_ranges(Some(&host), Some(&cross_matches)),
+                vec![(0.05, 0.05)],
+                "fell through to nothing for {host:?}"
+            );
+        }
+    }
+}

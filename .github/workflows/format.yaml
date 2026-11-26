@@ -5,6 +5,11 @@ on:
     branches: ["main"]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # Only PR runs are superseded; main keeps one run, and one status, per commit.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   all:
     name: Run prek hooks
@@ -19,6 +24,8 @@ jobs:
 
       - name: Configure cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2

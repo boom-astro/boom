@@ -1,0 +1,306 @@
+{
+  "type": "record",
+  "namespace": "argus.alert",
+  "name": "ssoAssociation",
+  "doc": "Metadata and (depending on cadence) photometric history of the SSO associated with this candidate.",
+  "version": "3.0",
+  "fields": [
+    {
+      "name": "ssoId",
+      "type": "string",
+      "doc": "MPC designation of the associated object, packed form."
+    },
+    {
+      "name": "spkId",
+      "type": "long",
+      "doc": "JPL SPK-ID; stable integer machine key."
+    },
+    {
+      "name": "ssoName",
+      "type": [
+        "null",
+        "string"
+      ],
+      "doc": "IAU name.",
+      "default": null
+    },
+    {
+      "name": "orbSource",
+      "type": [
+        "null",
+        "string"
+      ],
+      "doc": "Source of the orbital elements and physical properties used to generate the prediction.",
+      "default": null
+    },
+    {
+      "name": "ephRa",
+      "type": [
+        "null",
+        "double"
+      ],
+      "doc": "Predicted right ascension at obsWeightedMidpoint (degrees).",
+      "default": null
+    },
+    {
+      "name": "ephDec",
+      "type": [
+        "null",
+        "double"
+      ],
+      "doc": "Predicted declination at the same epoch (degrees).",
+      "default": null
+    },
+    {
+      "name": "ephVmag",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Predicted apparent V magnitude at the same epoch.",
+      "default": null
+    },
+    {
+      "name": "ephOffsetRa",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Candidate centroid minus prediction, in right ascension (arcsec).",
+      "default": null
+    },
+    {
+      "name": "ephOffsetDec",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The same residual in declination (arcsec).",
+      "default": null
+    },
+    {
+      "name": "ephOffsetAlongTrack",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Residual projected along the object's direction of motion (arcsec); isolates a timing error.",
+      "default": null
+    },
+    {
+      "name": "ephOffsetCrossTrack",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Residual projected across the direction of motion (arcsec); isolates an orbit error.",
+      "default": null
+    },
+    {
+      "name": "ephRateRa",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Predicted rate of change of right ascension (arcsec/s).",
+      "default": null
+    },
+    {
+      "name": "ephRateDec",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Predicted rate of change of declination (arcsec/s).",
+      "default": null
+    },
+    {
+      "name": "ephTrailLength",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Predicted trail length over the candidate's integrationTime (arcsec).",
+      "default": null
+    },
+    {
+      "name": "ephTrailAngle",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Position angle of the predicted motion, degrees east of north.",
+      "default": null
+    },
+    {
+      "name": "topoDist",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Observer-to-object distance at the alert epoch (AU).",
+      "default": null
+    },
+    {
+      "name": "helioDist",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Sun-to-object distance at the alert epoch (AU).",
+      "default": null
+    },
+    {
+      "name": "eclLambda",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Ecliptic longitude at the alert epoch (degrees).",
+      "default": null
+    },
+    {
+      "name": "eclBeta",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Ecliptic latitude at the alert epoch (degrees).",
+      "default": null
+    },
+    {
+      "name": "phaseAngle",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Sun-object-observer angle at the alert epoch (degrees).",
+      "default": null
+    },
+    {
+      "name": "reducedMag",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Observed magnitude with the distance and phase terms removed (H_obs).",
+      "default": null
+    },
+    {
+      "name": "reducedMagMean",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Mean reducedMag over all candidates associated with this object in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "reducedMagMin",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Minimum of the same.",
+      "default": null
+    },
+    {
+      "name": "reducedMagMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Maximum of the same.",
+      "default": null
+    },
+    {
+      "name": "reducedMagRms",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "RMS scatter of the same.",
+      "default": null
+    },
+    {
+      "name": "firstDetection",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "Epoch of the first candidate ever associated with this event/SSO, at any cadence.",
+      "default": null
+    },
+    {
+      "name": "mostRecentDetectionAtCadence",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "Epoch of the most recent candidate associated with this object at this cadence.",
+      "default": null
+    },
+    {
+      "name": "numDetectionAtThisCadence",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "Number of candidates associated with this object at this cadence.",
+      "default": null
+    },
+    {
+      "name": "numDetectionBaseCadence",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "Number of candidates associated with this object at base cadence.",
+      "default": null
+    },
+    {
+      "name": "ssoHistory",
+      "type": [
+        "null",
+        {
+          "type": "array",
+          "items": {
+            "type": "record",
+            "namespace": "argus.alert",
+            "name": "ssoHistoryEntry",
+            "doc": "One prior association of the matched SSO, carried in residual space alongside the full candidate record.",
+            "fields": [
+              {
+                "name": "epoch",
+                "type": "long",
+                "doc": "Epoch of the association."
+              },
+              {
+                "name": "ephOffsetRa",
+                "type": "float",
+                "doc": "Candidate centroid minus prediction, in right ascension (arcsec)."
+              },
+              {
+                "name": "ephOffsetDec",
+                "type": "float",
+                "doc": "The same residual in declination (arcsec)."
+              },
+              {
+                "name": "reducedMag",
+                "type": "float",
+                "doc": "Observed magnitude with the distance and phase terms removed (mag)."
+              },
+              {
+                "name": "candidate",
+                "type": "argus.alert.candidate",
+                "doc": "Candidate record for this association."
+              }
+            ]
+          }
+        }
+      ],
+      "doc": "The last q associations of this object, carried in residual space. (The value of q is TBD, will vary with cadence, and will possibly be 0 at lower/higher cadences.)",
+      "default": null
+    }
+  ]
+}

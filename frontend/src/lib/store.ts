@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import api, { Profile } from './api'
+import api, { UnauthorizedError, type Profile } from './api'
 
 async function generateAvatarUrl(email: string) {
     const msgUint8 = new TextEncoder().encode(email.trim().toLowerCase());
@@ -49,14 +49,36 @@ export const useAppStore = create<AppState>()(
   )
 )
 
+// The profile is persisted, so it outlives the token that justified it. Dropping
+// the credential without dropping the profile leaves whatever was gated on that
+// profile -- the admin page most visibly -- rendered over a session that no
+// longer exists.
+api.setLogoutHandler(() => {
+  if (useAppStore.getState().profile) useAppStore.getState().clearProfile()
+})
+
 // helper to load profile if authenticated and no profile in store
-export async function ensureProfileLoaded() {
+//
+// Pass `{ force: true }` whenever the token has just changed. The cache is keyed
+// on nothing but age, so a profile fetched minutes ago under the *previous*
+// token still counts as fresh — which is how signing in as somebody else could
+// leave the sidebar showing the account you just left. Returns the profile in
+// play so callers don't need a second fetch to read it.
+export async function ensureProfileLoaded(options?: { force?: boolean }): Promise<Profile> {
   const token = api.getTokenRecord()
-  if (!token) return
+  if (!token) {
+    if (useAppStore.getState().profile) useAppStore.getState().clearProfile()
+    return null
+  }
   const state = useAppStore.getState()
-  if (state.profile && state.lastUpdated && state.lastUpdated > Date.now() - 5 * 60 * 1000) {
+  if (
+    !options?.force &&
+    state.profile &&
+    state.lastUpdated &&
+    state.lastUpdated > Date.now() - 5 * 60 * 1000
+  ) {
     // profile exists and was updated less than 5min ago
-    return
+    return state.profile
   }
     try {
     const data = await api.fetchProfile()
@@ -69,11 +91,20 @@ export async function ensureProfileLoaded() {
         data.avatar = await generateAvatarUrl(data.email);
     }
     useAppStore.getState().setProfile(data)
+    return data
   } catch (err: unknown) {
-    // if fetchProfile throws (e.g. unauthorized) clear token
     console.error('ensureProfileLoaded: failed to fetch profile', err)
-    api.logout()
-    useAppStore.getState().clearProfile()
+    // Only an authentication failure signs the user out. Every failure used to:
+    // a transient 500 or a dropped connection on this one request logged
+    // somebody out of the whole app and discarded whatever they were part way
+    // through. The profile already in the store is the better answer -- it is
+    // what the page was rendering a moment ago -- and the next request that
+    // really is unauthorized clears it through the handler above.
+    if (err instanceof UnauthorizedError) {
+      api.logout()
+      return null
+    }
+    return useAppStore.getState().profile
   }
 }
 

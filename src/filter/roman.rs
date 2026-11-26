@@ -1,13 +1,14 @@
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::conf::AppConfig;
 use crate::enrichment::{create_roman_alert_pipeline, fetch_alerts, RomanAlertForEnrichment};
 use crate::filter::{
-    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, Classification, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
+    build_loaded_filters, record_filter_result, run_filter, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, Alert, Classification, Filter, FilterError,
+    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry,
+    SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -81,8 +82,6 @@ pub async fn build_roman_alerts(
             });
         }
 
-        // `band` is nullable in the RAPID schema; a point without one cannot be
-        // placed on a lightcurve, so it is left out of the packet.
         let mut photometry = Vec::new();
         for (points, origin) in [
             (alert.prv_candidates.iter(), Origin::Alert),
@@ -98,7 +97,7 @@ pub async fn build_roman_alerts(
                     flux_err: doc.flux_err,
                     band: format!("roman{}", band),
                     origin: origin.clone(),
-                    programid: 1, // RAPID publishes a single stream
+                    programid: 1,
                     survey: Survey::Roman,
                     ra: doc.ra,
                     dec: doc.dec,
@@ -127,13 +126,12 @@ pub async fn build_roman_alerts(
             cutout_template: cutouts.cutout_template,
             cutout_difference: cutouts.cutout_difference,
             survey: Survey::Roman,
-            // Roman objects are cross-matched to ZTF/LSST in the aux `aliases`,
-            // but the matched lightcurves are not bundled into the outgoing
-            // packet yet (cf. LSST, which bundles ZTF).
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
+            host_galaxy: None,
         };
 
         alerts_output.push(alert);
@@ -142,11 +140,6 @@ pub async fn build_roman_alerts(
     Ok(alerts_output)
 }
 
-/// Builds a MongoDB aggregation pipeline for Roman filter execution.
-///
-/// Augments the user filter pipeline with Roman aux lookups (prv_candidates,
-/// fp_hists, cross_matches, aliases) based on which fields the filter
-/// references.
 pub async fn build_roman_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
     _permissions: &HashMap<Survey, Vec<i32>>,
@@ -338,8 +331,6 @@ impl FilterWorker for RomanFilterWorker {
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
 
-        // RAPID publishes a single stream (no programids), so the queue holds
-        // bare candids.
         let candids: Vec<i64> = alerts.iter().map(|alert| alert.parse().unwrap()).collect();
 
         let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
@@ -352,14 +343,16 @@ impl FilterWorker for RomanFilterWorker {
             )
             .await?;
 
+            record_filter_result(&Survey::Roman, filter, out_documents.len(), candids.len());
+            debug!(
+                "{}/{} ROMAN alerts passed filter {}",
+                out_documents.len(),
+                candids.len(),
+                filter.id,
+            );
+
             if out_documents.is_empty() {
                 continue;
-            } else {
-                info!(
-                    "{} alerts passed roman filter {}",
-                    out_documents.len(),
-                    filter.id,
-                );
             }
 
             let now_ts = chrono::Utc::now().timestamp_millis() as f64;

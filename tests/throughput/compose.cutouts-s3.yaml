@@ -3,7 +3,7 @@
 
 services:
   rustfs:
-    image: rustfs/rustfs:latest
+    image: rustfs/rustfs:1.0.0-rc.5
     hostname: rustfs
     restart: unless-stopped
     expose:
@@ -15,7 +15,6 @@ services:
       - RUSTFS_SECRET_KEY=rustfsadminsecret
       - RUSTFS_ADDRESS=0.0.0.0:9000
       - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
-      - RUSTFS_SERVER_DOMAINS=rustfs
       - RUSTFS_CONSOLE_ENABLE=true
     networks:
       - boom
