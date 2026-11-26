@@ -6,10 +6,10 @@ function hostUrl(host: HostSummary): string | null {
   if (host.catalog === 'NED' && host.name) {
     return `https://ned.ipac.caltech.edu/byname?objname=${encodeURIComponent(host.name)}`;
   }
-  if (host.catalog === 'PS1_DR2_HOSTS' && host.name) {
-    return `https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/stack.csv?objID=${encodeURIComponent(host.name)}`;
-  }
   if (host.ra == null || host.dec == null) return null;
+  if (host.catalog === 'PS1_DR2_HOSTS') {
+    return `https://ps1images.stsci.edu/cgi-bin/ps1cutouts?pos=${host.ra}+${host.dec}&filter=color`;
+  }
   const layer = host.catalog === 'LSDR9' ? 'ls-dr9' : 'ls-dr10';
   return `https://www.legacysurvey.org/viewer?ra=${host.ra}&dec=${host.dec}&layer=${layer}&zoom=16&mark=${host.ra},${host.dec}`;
 }
