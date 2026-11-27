@@ -5,6 +5,7 @@ mod decam;
 mod fields;
 mod lsst;
 mod roman;
+mod shared_aux;
 pub mod simulation;
 mod winter;
 mod ztf;
@@ -38,6 +39,7 @@ pub use lsst::{
 };
 use lsst::{build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed, lsst_survey_match};
 pub use roman::{build_roman_filter_pipeline, RomanFilterWorker};
+use shared_aux::{aux_lookup, run_filters};
 pub use winter::{
     build_winter_alerts, build_winter_filter_pipeline, create_winter_filter_alert_pipeline,
     WinterFilterWorker,

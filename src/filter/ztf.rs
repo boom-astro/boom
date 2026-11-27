@@ -9,13 +9,13 @@ use crate::enrichment::{
     fetch_alerts, LsstMatch, ZtfAlertClassifications, ZtfMatch, ZtfPhotometry,
 };
 use crate::filter::{
-    add_decam_survey_match, build_decam_aux_data, build_loaded_filters, build_lsst_aux_data,
-    decam_survey_match, insert_decam_aux_pipeline_if_needed, insert_lsst_aux_pipeline_if_needed,
-    lsst_survey_match, parse_programid_candid_tuple, record_filter_result, run_filter,
-    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, AlertHostGalaxy, Classification, DecamMatch, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
-    SurveyMatches,
+    add_decam_survey_match, aux_lookup, build_decam_aux_data, build_loaded_filters,
+    build_lsst_aux_data, decam_survey_match, insert_decam_aux_pipeline_if_needed,
+    insert_lsst_aux_pipeline_if_needed, lsst_survey_match, parse_programid_candid_tuple,
+    record_filter_result, run_filters, update_aliases_index_multiple, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, Alert, AlertHostGalaxy, Classification,
+    DecamMatch, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
+    Origin, Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -724,14 +724,7 @@ pub async fn build_ztf_filter_pipeline(
         }
 
         if insert_aux_pipeline && i == insert_aux_index {
-            pipeline.push(doc! {
-                "$lookup": doc! {
-                    "from": "ZTF_alerts_aux",
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            });
+            pipeline.push(aux_lookup("ZTF_alerts_aux", &aux_add_fields));
             pipeline.push(doc! {
                 "$addFields": &aux_add_fields
             });
@@ -1032,21 +1025,14 @@ impl FilterWorker for ZtfFilterWorker {
                 }
             };
 
-            for filter in &self.filters {
-                // If the filter ID is not in the list of filter IDs for this
-                // programid, skip it
-                if !filter_ids_with_perms.contains(&filter.id) {
-                    continue;
-                }
+            let filters: Vec<&LoadedFilter> = self
+                .filters
+                .iter()
+                .filter(|filter| filter_ids_with_perms.contains(&filter.id))
+                .collect();
+            let outputs = run_filters(&candids, &filters, &self.alert_collection).await?;
 
-                let out_documents = run_filter(
-                    &candids,
-                    &filter.id,
-                    filter.pipeline.clone(),
-                    &self.alert_collection,
-                )
-                .await?;
-
+            for (filter, out_documents) in filters.into_iter().zip(outputs) {
                 record_filter_result(&Survey::Ztf, filter, out_documents.len(), candids.len());
                 debug!(
                     "{}/{} ZTF alerts with programid {} passed filter {}",

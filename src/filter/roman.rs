@@ -5,7 +5,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::conf::AppConfig;
 use crate::enrichment::{create_roman_alert_pipeline, fetch_alerts, RomanAlertForEnrichment};
 use crate::filter::{
-    build_loaded_filters, record_filter_result, run_filter, uses_field_in_filter,
+    aux_lookup, build_loaded_filters, record_filter_result, run_filters, uses_field_in_filter,
     validate_filter_pipeline, watchlist_projections, Alert, Classification, Filter, FilterError,
     FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry,
     SurveyMatches,
@@ -226,14 +226,7 @@ pub async fn build_roman_filter_pipeline(
         let x = mongodb::bson::to_document(&filter_pipeline[i])?;
 
         if insert_aux_pipeline && i == insert_aux_index {
-            pipeline.push(doc! {
-                "$lookup": doc! {
-                    "from": "ROMAN_alerts_aux",
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            });
+            pipeline.push(aux_lookup("ROMAN_alerts_aux", &aux_add_fields));
             pipeline.push(doc! {
                 "$addFields": &aux_add_fields
             });
@@ -334,15 +327,9 @@ impl FilterWorker for RomanFilterWorker {
         let candids: Vec<i64> = alerts.iter().map(|alert| alert.parse().unwrap()).collect();
 
         let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
-        for filter in &self.filters {
-            let out_documents = run_filter(
-                &candids,
-                &filter.id,
-                filter.pipeline.clone(),
-                &self.alert_collection,
-            )
-            .await?;
-
+        let filters: Vec<&LoadedFilter> = self.filters.iter().collect();
+        let outputs = run_filters(&candids, &filters, &self.alert_collection).await?;
+        for (filter, out_documents) in filters.into_iter().zip(outputs) {
             record_filter_result(&Survey::Roman, filter, out_documents.len(), candids.len());
             debug!(
                 "{}/{} ROMAN alerts passed filter {}",
