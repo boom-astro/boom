@@ -746,6 +746,13 @@ pub async fn add_catalog(
             )
             .await
             .map_err(IngestError::from)?;
+            crate::utils::db::create_index(
+                &db.collection::<Document>(def.collection),
+                doc! {"comparison": 1, "pair_sigma": -1, "delta_km_s": -1, "_id": 1},
+                false,
+            )
+            .await
+            .map_err(IngestError::from)?;
         }
         if !finish_state(&state, def.collection, claim).await? {
             return Err(CatalogError::Preempted {

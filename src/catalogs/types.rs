@@ -313,6 +313,10 @@ pub struct ArchivalRepeatRv {
     #[serde(rename = "_id")]
     id: String,
     source_id: String,
+    #[serde(default)]
+    comparison: ArchiveRvComparison,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cross_pipeline: Option<CrossPipelineRv>,
     survey: String,
     release: String,
     product: String,
@@ -328,9 +332,30 @@ pub struct ArchivalRepeatRv {
 
 impl HasCoordinates for ArchivalRepeatRv {}
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ArchiveRvComparison {
+    #[default]
+    SamePipeline,
+    CrossPipeline,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CrossPipelineRv {
+    calibration_id: String,
+    pipeline_b: String,
+    raw_b_minus_a_km_s: f64,
+    corrected_b_minus_a_km_s: f64,
+    corrected_error_km_s: f64,
+    offset_b_minus_a_km_s: f64,
+    offset_error_km_s: f64,
+    scatter_km_s: f64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ArchivalRvVisit {
     id: String,
+    pipeline: Option<String>,
     ra: f64,
     dec: f64,
     mjd: f64,

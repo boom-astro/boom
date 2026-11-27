@@ -256,14 +256,19 @@ Authenticated BOOM users can query `Archival_Repeat_RV_v1` with
 ```json
 {
   "catalog_name": "Archival_Repeat_RV_v1",
-  "filter": {"survey": "lamost", "n_visits": {"$gte": 3}},
+  "filter": {"comparison": "same_pipeline", "survey": "lamost", "n_visits": {"$gte": 3}},
   "sort": {"pair_sigma": -1, "delta_km_s": -1, "_id": 1},
   "limit": 100
 }
 ```
 
 `pair_sigma` is a ranking statistic based on the visit uncertainties and
-instrument-specific error floors. The catalog is available for direct
+instrument-specific error floors. A cross-survey pair has
+`comparison: "cross_pipeline"` and keeps the signed raw and corrected RV
+difference, calibration ID, and uncertainty components under `cross_pipeline`.
+Use the comparison filter to rank one category at a time.
+
+The catalog is available for direct
 queries and stays outside alert crossmatching.
 
 ### Staged catalogs
