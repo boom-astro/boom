@@ -13,7 +13,9 @@ def _path() -> Path:
     directory = Path(os.environ.get("BOOM_CATALOG_DATA_PATH", "data/catalogs"))
     path = directory / "staged" / ID / FILENAME
     if not path.is_file():
-        raise FileNotFoundError(f"Stage the completed repeat-RV search output at {path}")
+        raise FileNotFoundError(
+            f"Stage the completed repeat-RV search output at {path}"
+        )
     return path
 
 
