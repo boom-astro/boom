@@ -36,6 +36,8 @@ use tracing::instrument;
 /// its own right.
 pub const STATE_COLLECTION: &str = "catalog_state";
 
+pub const ARCHIVAL_REPEAT_RV_COLLECTION: &str = "Archival_Repeat_RV_v1";
+
 /// The task type whose runs populate these collections.
 const TASK_TYPE_CATALOG_INGEST: &str = crate::tasks::catalog_ingest::TASK_TYPE;
 pub(crate) const PS1_HOSTS_COLLECTION: &str = "PS1_DR2_HOSTS";
@@ -80,6 +82,7 @@ pub enum Reader {
     /// Legacy Survey point-source scores, staged gzipped JSONL exported from
     /// BOOM's own copy.
     Lspsc,
+    ArchivalRepeatRv,
     Erass1,
     FiveXmm,
     TwoSxps,
@@ -276,6 +279,16 @@ pub const CATALOGS: &[CatalogDef] = &[
                       its own copy: run the export_catalog task, stage the result, ingest \
                       it. See docs/catalogs.md.",
         reader: Reader::Lspsc,
+        source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "archival-repeat-rv",
+        collection: ARCHIVAL_REPEAT_RV_COLLECTION,
+        title: "Archival repeat radial velocity candidates",
+        description:
+            "Ranked repeat-RV candidates from public LAMOST, SDSS and DESI visit metadata.",
+        reader: Reader::ArchivalRepeatRv,
         source: Source::Staged,
         aliases: &[],
     },
@@ -725,6 +738,15 @@ pub async fn add_catalog(
         // catalog should not be servable anyway.
         ctx.info(format!("building indexes on {}", def.collection));
         inserter.create_indexes(true).await?;
+        if def.collection == ARCHIVAL_REPEAT_RV_COLLECTION {
+            crate::utils::db::create_index(
+                &db.collection::<Document>(def.collection),
+                doc! {"pair_sigma": -1, "delta_km_s": -1, "_id": 1},
+                false,
+            )
+            .await
+            .map_err(IngestError::from)?;
+        }
         if !finish_state(&state, def.collection, claim).await? {
             return Err(CatalogError::Preempted {
                 chunk: "the final state write".to_string(),
@@ -871,6 +893,9 @@ async fn ingest_file(
         Reader::Ps1Hosts => Ok(jsonl::ingest_jsonl::<types::Ps1Host>(inserter, path).await?),
         Reader::LsDr9 => Ok(arrow::ingest_parquet::<types::LsDr9>(inserter, path).await?),
         Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
+        Reader::ArchivalRepeatRv => {
+            Ok(jsonl::ingest_jsonl::<types::ArchivalRepeatRv>(inserter, path).await?)
+        }
         Reader::Erass1 => Ok(arrow::ingest_parquet::<types::Erass1>(inserter, path).await?),
         Reader::FiveXmm => Ok(arrow::ingest_parquet::<types::FiveXmm>(inserter, path).await?),
         Reader::TwoSxps => Ok(arrow::ingest_parquet::<types::TwoSxps>(inserter, path).await?),
@@ -1685,7 +1710,15 @@ mod source_tests {
             .collect();
         // lspsc is an export of BOOM's own copy and the DESI DR1 dwarfs are not
         // published: neither can be fetched, and their files must not be deleted.
-        assert_eq!(staged, vec!["desi-dr1-dwarfs", "panstarrs-hosts", "lspsc"]);
+        assert_eq!(
+            staged,
+            vec![
+                "desi-dr1-dwarfs",
+                "panstarrs-hosts",
+                "lspsc",
+                "archival-repeat-rv"
+            ]
+        );
     }
 
     #[test]

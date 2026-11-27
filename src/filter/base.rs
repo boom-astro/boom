@@ -1404,6 +1404,8 @@ mod tests {
             z: Some(0.009727),
             z_err: Some(0.000_01),
             z_type: None,
+            z_catalog: None,
+            z_source_id: None,
             dist_mpc: Some(40.0),
             dist_mpc_method: Some("zIndependent".to_string()),
             a_arcsec: 60.0,

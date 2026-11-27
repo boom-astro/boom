@@ -173,6 +173,8 @@ async fn add_spectrum_at_host_center(
         host.z = z;
         host.z_err = z_err;
         host.z_type = Some(catalog::SPECTROSCOPIC.to_string());
+        host.z_catalog = Some(config.desi_catalog.clone());
+        host.z_source_id = catalog::opt_objname(spectrum, "_id");
     }
 }
 
@@ -202,6 +204,49 @@ mod tests {
             "Diam_pa": 30.0_f64,
             "DistMpc": 16.8_f64,
         }
+    }
+
+    #[test]
+    fn desi_redshift_provenance_reaches_the_alert_summary() {
+        let config = enabled_config();
+        let mut host = ngc4321();
+        host.insert("z_tech", "PHOT");
+        let bad = doc! {
+            "_id": 123_i64, "ra": 185.72875, "dec": 15.8223,
+            "z": 0.91, "zerr": 0.00002, "zwarn": 4, "spectype": "GALAXY"
+        };
+        let good = doc! {
+            "_id": 39627848784286649_i64, "ra": 185.72885, "dec": 15.8223,
+            "z": 0.0054, "zerr": 0.00001, "zwarn": 0, "spectype": "GALAXY"
+        };
+        let rows = HashMap::from([
+            (NED.to_string(), vec![host]),
+            (config.desi_catalog.clone(), vec![bad, good]),
+        ]);
+        let association = associate_from_xmatches(185.72875, 15.8223, &rows, &config).unwrap();
+        let summary = HostSummary::from(association.best_host.as_ref().unwrap());
+        assert_eq!(summary.z, Some(0.0054));
+        assert_eq!(summary.z_err, Some(0.00001));
+        assert_eq!(summary.z_type.as_deref(), Some("spectroscopic"));
+        assert_eq!(
+            summary.z_catalog.as_deref(),
+            Some(config.desi_catalog.as_str())
+        );
+        assert_eq!(summary.z_source_id.as_deref(), Some("39627848784286649"));
+        assert_eq!(summary.ra, Some(185.72875));
+        assert!(summary.posterior.is_some());
+    }
+
+    #[test]
+    fn an_older_best_host_summary_has_unknown_redshift_provenance() {
+        let old = doc! {
+            "name": "NGC 4321", "catalog": "NED", "z": 0.0054,
+            "sep_arcsec": 0.2, "d_dlr": 0.1
+        };
+        let summary: HostSummary = mongodb::bson::from_document(old).unwrap();
+        assert_eq!(summary.z, Some(0.0054));
+        assert_eq!(summary.z_type, None);
+        assert_eq!(summary.z_catalog, None);
     }
 
     #[test]

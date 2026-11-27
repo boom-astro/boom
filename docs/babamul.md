@@ -353,9 +353,25 @@ flowchart TD
 ### Host galaxy
 
 Every ZTF and LSST alert carries its best host in `properties.best_host` (null
-when there is none): `name`, `catalog`, `z`, `dist_mpc`, `dist_mpc_method`,
-`sep_arcsec`, `sep_kpc` and `d_dlr`, the separation in units of the galaxy's
+when there is none). The summary includes host coordinates, association
+`posterior`, `sep_arcsec`, and `d_dlr`, the separation in units of the galaxy's
 directional light radius. Only NED-LVS hosts have a `dist_mpc`.
+
+For 4MOST target selection, inspect `best_host.z`, `z_err`, `z_type`,
+`z_catalog` and `z_source_id`. A positive `z` with
+`z_type == "spectroscopic"` is a spectroscopic host redshift. The host
+association posterior is separate from the quality of the redshift. For
+example, a Legacy Survey host can have `catalog: "LSDR10"` and
+`z_catalog: "DESI_DR1"`. Catalog IDs are strings to preserve large integers.
+Historical summaries may omit these fields. Treat an absent redshift type
+as unknown. The object API exposes the same provenance where available.
+
+The host fields are available on the ZTF and LSST alert streams. To retrieve
+alerts with spectroscopic host redshifts over REST, add
+`has_host_spectroscopic_redshift=true` to
+`GET /babamul/surveys/{survey}/alerts` with an object, position, or time range.
+A value of `false` returns alerts without a positive spectroscopic host
+redshift, including older alerts with unknown provenance.
 
 To follow transients in nearby galaxies (Sand et al. 2026, arXiv:2609.38304),
 subscribe to the `hosted` topics and keep the alerts whose

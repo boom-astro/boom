@@ -239,6 +239,32 @@ joined on an id. The ingest checks that before merging them, because a truncated
 download would otherwise attach each source to a different source's redshift and
 nothing downstream could tell.
 
+### Archival repeat radial velocities
+
+The `archival-repeat-rv` staged catalog ingests the ranked output from
+[`boom-catalogs`](https://github.com/boom-astro/boom-catalogs). Stage
+`candidates-v1.jsonl.gz` at
+`<catalog data path>/staged/archival-repeat-rv/` and run the catalog ingest
+task. The archive-wide scan reads the completed LAMOST, SDSS, and DESI
+metadata manifest and keeps archive FITS locators for the best pair in each
+candidate.
+
+Authenticated BOOM users can query `Archival_Repeat_RV_v1` with
+`POST /queries/find` or `POST /queries/cone_search`. For example:
+
+```json
+{
+  "catalog_name": "Archival_Repeat_RV_v1",
+  "filter": {"survey": "lamost", "n_visits": {"$gte": 3}},
+  "sort": {"pair_sigma": -1, "delta_km_s": -1, "_id": 1},
+  "limit": 100
+}
+```
+
+`pair_sigma` is a ranking statistic based on the visit uncertainties and
+instrument-specific error floors. The catalog is available for direct
+queries and stays outside alert crossmatching.
+
 ### Staged catalogs
 
 A staged catalog is one BOOM ingests but does not fetch: the files are put in

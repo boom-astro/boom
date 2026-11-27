@@ -1,6 +1,7 @@
 /// Functionality for working with analytical data catalogs.
 use crate::{
     api::{db::PROTECTED_COLLECTION_NAMES, routes::users::User},
+    catalogs::ARCHIVAL_REPEAT_RV_COLLECTION,
     conf::AppConfig,
     utils::enums::Survey,
 };
@@ -74,6 +75,7 @@ pub fn is_cone_searchable(catalog_name: &str, config: &AppConfig) -> bool {
             survey_collection_suffix(catalog_name),
             Some("alerts" | "alerts_aux")
         )
+        || catalog_name == ARCHIVAL_REPEAT_RV_COLLECTION
         || is_reference_catalog(catalog_name, config)
 }
 
@@ -83,6 +85,7 @@ pub fn is_catalog_queryable(catalog_name: &str, user: &User, config: &AppConfig)
         && (user.is_admin
             || catalog_name.starts_with(WATCHLIST_PREFIX)
             || survey_collection_suffix(catalog_name).is_some()
+            || catalog_name == ARCHIVAL_REPEAT_RV_COLLECTION
             || is_reference_catalog(catalog_name, config))
 }
 
@@ -115,6 +118,16 @@ mod tests {
             is_admin,
             watchlist_access: watchlist_access.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn repeat_rv_can_be_queried_without_entering_alert_crossmatching() {
+        let config = test_config_with_crossmatch(&[]);
+        let user = user(false, &[]);
+        let name = ARCHIVAL_REPEAT_RV_COLLECTION;
+        assert!(!is_reference_catalog(name, &config));
+        assert!(is_catalog_queryable(name, &user, &config));
+        assert!(is_cone_searchable(name, &config));
     }
 
     #[test]

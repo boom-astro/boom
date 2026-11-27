@@ -39,6 +39,8 @@ fn candidate(row: Ps1Host, cuts: &Ps1FallbackConfig) -> Option<GalaxyCandidate> 
         redshift,
         redshift_err,
         redshift_type: redshift.map(|_| PHOTOMETRIC.to_string()),
+        redshift_catalog: redshift.map(|_| PS1_HOSTS_COLLECTION.to_string()),
+        redshift_source_id: redshift.map(|_| row.id.to_string()),
         dist_mpc: None,
         dist_mpc_method: None,
         mag: None,

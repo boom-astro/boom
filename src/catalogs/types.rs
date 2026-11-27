@@ -308,6 +308,50 @@ pub struct Lspsc {
 
 impl HasCoordinates for Lspsc {}
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArchivalRepeatRv {
+    #[serde(rename = "_id")]
+    id: String,
+    source_id: String,
+    survey: String,
+    release: String,
+    product: String,
+    method: String,
+    ra: f64,
+    dec: f64,
+    n_visits: u32,
+    delta_km_s: f64,
+    pair_sigma: f64,
+    baseline_days: f64,
+    best_pair: [ArchivalRvVisit; 2],
+}
+
+impl HasCoordinates for ArchivalRepeatRv {}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ArchivalRvVisit {
+    id: String,
+    ra: f64,
+    dec: f64,
+    mjd: f64,
+    snr: f64,
+    rv_km_s: f64,
+    rv_error_km_s: f64,
+    effective_error_km_s: f64,
+    spectrum: Option<ArchiveSpectrumLocator>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde_with::skip_serializing_none]
+struct ArchiveSpectrumLocator {
+    format: String,
+    url: Option<String>,
+    urls: Option<Vec<String>>,
+    extensions: Option<Vec<String>>,
+    target_id: Option<String>,
+    layout: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // AllWISE -- parquet
 // ---------------------------------------------------------------------------
