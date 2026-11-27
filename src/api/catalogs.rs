@@ -1,6 +1,7 @@
 /// Functionality for working with analytical data catalogs.
 use crate::{
     api::{db::PROTECTED_COLLECTION_NAMES, routes::users::User},
+    catalogs::ARCHIVAL_RV_PILOT_COLLECTION,
     conf::AppConfig,
     utils::enums::Survey,
 };
@@ -70,6 +71,7 @@ pub fn is_reference_catalog(catalog_name: &str, config: &AppConfig) -> bool {
 /// Whether the catalog has coordinates to cone search, without checking user access.
 pub fn is_cone_searchable(catalog_name: &str, config: &AppConfig) -> bool {
     catalog_name.starts_with(WATCHLIST_PREFIX)
+        || catalog_name == ARCHIVAL_RV_PILOT_COLLECTION
         || matches!(
             survey_collection_suffix(catalog_name),
             Some("alerts" | "alerts_aux")
@@ -82,6 +84,7 @@ pub fn is_catalog_queryable(catalog_name: &str, user: &User, config: &AppConfig)
     is_catalog_name_visible(catalog_name, Some(user))
         && (user.is_admin
             || catalog_name.starts_with(WATCHLIST_PREFIX)
+            || catalog_name == ARCHIVAL_RV_PILOT_COLLECTION
             || survey_collection_suffix(catalog_name).is_some()
             || is_reference_catalog(catalog_name, config))
 }
@@ -197,6 +200,18 @@ mod tests {
         for name in ["ZTF_alerts_cutouts", "css_dets", "ZTF_alerts_aux_20260519"] {
             assert!(!is_cone_searchable(name, &config), "{name}");
         }
+    }
+
+    #[test]
+    fn test_archival_rv_pilot_is_queryable_without_alert_crossmatches() {
+        let config = test_config_with_crossmatch(&[]);
+        assert!(is_cone_searchable(ARCHIVAL_RV_PILOT_COLLECTION, &config));
+        assert!(is_catalog_queryable(
+            ARCHIVAL_RV_PILOT_COLLECTION,
+            &user(false, &[]),
+            &config
+        ));
+        assert!(!is_reference_catalog(ARCHIVAL_RV_PILOT_COLLECTION, &config));
     }
 
     #[test]

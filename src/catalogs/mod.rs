@@ -36,6 +36,9 @@ use tracing::instrument;
 /// its own right.
 pub const STATE_COLLECTION: &str = "catalog_state";
 
+/// Source catalog queried by the SkyPortal archival RV pilot.
+pub const ARCHIVAL_RV_PILOT_COLLECTION: &str = "Archival_RV_Pilot_v1";
+
 /// The task type whose runs populate these collections.
 const TASK_TYPE_CATALOG_INGEST: &str = crate::tasks::catalog_ingest::TASK_TYPE;
 pub(crate) const PS1_HOSTS_COLLECTION: &str = "PS1_DR2_HOSTS";
@@ -80,6 +83,7 @@ pub enum Reader {
     /// Legacy Survey point-source scores, staged gzipped JSONL exported from
     /// BOOM's own copy.
     Lspsc,
+    ArchivalRvPilot,
     Erass1,
     FiveXmm,
     TwoSxps,
@@ -276,6 +280,15 @@ pub const CATALOGS: &[CatalogDef] = &[
                       its own copy: run the export_catalog task, stage the result, ingest \
                       it. See docs/catalogs.md.",
         reader: Reader::Lspsc,
+        source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "archival-rv-pilot",
+        collection: ARCHIVAL_RV_PILOT_COLLECTION,
+        title: "Archival radial velocity pilot",
+        description: "Source-level LAMOST, SDSS, and DESI observation metadata and Fermi associations for the eclipsing binary and spider pilot.",
+        reader: Reader::ArchivalRvPilot,
         source: Source::Staged,
         aliases: &[],
     },
@@ -871,6 +884,9 @@ async fn ingest_file(
         Reader::Ps1Hosts => Ok(jsonl::ingest_jsonl::<types::Ps1Host>(inserter, path).await?),
         Reader::LsDr9 => Ok(arrow::ingest_parquet::<types::LsDr9>(inserter, path).await?),
         Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
+        Reader::ArchivalRvPilot => {
+            Ok(jsonl::ingest_jsonl::<types::ArchivalRvPilot>(inserter, path).await?)
+        }
         Reader::Erass1 => Ok(arrow::ingest_parquet::<types::Erass1>(inserter, path).await?),
         Reader::FiveXmm => Ok(arrow::ingest_parquet::<types::FiveXmm>(inserter, path).await?),
         Reader::TwoSxps => Ok(arrow::ingest_parquet::<types::TwoSxps>(inserter, path).await?),
@@ -1683,9 +1699,10 @@ mod source_tests {
             .filter(|c| c.source == Source::Staged)
             .map(|c| c.id)
             .collect();
-        // lspsc is an export of BOOM's own copy and the DESI DR1 dwarfs are not
-        // published: neither can be fetched, and their files must not be deleted.
-        assert_eq!(staged, vec!["desi-dr1-dwarfs", "panstarrs-hosts", "lspsc"]);
+        assert_eq!(
+            staged,
+            vec!["desi-dr1-dwarfs", "panstarrs-hosts", "lspsc", "archival-rv-pilot"]
+        );
     }
 
     #[test]

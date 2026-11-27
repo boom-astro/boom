@@ -308,6 +308,24 @@ pub struct Lspsc {
 
 impl HasCoordinates for Lspsc {}
 
+/// One source in the archival radial velocity pilot.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArchivalRvPilot {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub sample: String,
+    pub kind: String,
+    pub aliases: Vec<String>,
+    pub period_min: Option<f64>,
+    pub observations: Vec<mongodb::bson::Document>,
+    pub fermi_matches: Vec<mongodb::bson::Document>,
+    pub review: Option<mongodb::bson::Document>,
+}
+
+impl HasCoordinates for ArchivalRvPilot {}
+
 // ---------------------------------------------------------------------------
 // AllWISE -- parquet
 // ---------------------------------------------------------------------------
