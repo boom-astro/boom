@@ -1434,6 +1434,7 @@ dependencies = [
  "regex",
  "reqwest 0.13.3",
  "rust-gp",
+ "sbpl-pso",
  "serde",
  "serde_json",
  "serde_with",
@@ -5830,6 +5831,22 @@ dependencies = [
  "duct",
  "libc",
  "pkg-config",
+]
+
+[[package]]
+name = "sbpl-pso"
+version = "0.1.0"
+source = "git+https://github.com/frenbox/sbpl-pso#d57f89c0045d87d889dab707c6557dc08bd37585"
+dependencies = [
+ "argmin",
+ "argmin-math",
+ "cc",
+ "csv",
+ "metal",
+ "rand 0.9.4",
+ "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
