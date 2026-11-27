@@ -348,7 +348,7 @@ pub(super) fn nearest_galaxy_spectrum(
     nearest_where(spectra, ra, dec, max_arcsec, is_good_galaxy_spectrum)
 }
 
-fn add_spectroscopic_redshift(
+pub(super) fn add_spectroscopic_redshift(
     galaxy: &mut GalaxyCandidate,
     spectra: &[Document],
     config: &HostGalaxyConfig,

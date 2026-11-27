@@ -37,13 +37,14 @@ mod error;
 mod likelihood;
 mod photometry;
 mod prior;
+mod ps1;
 mod sersic;
 mod types;
 
 pub use associate::{associate_host, AssociationConfig, AssociationResult};
 pub use association::{HostGalaxyAssociation, HostSummary, StoredHostCandidate};
 pub use catalog::{collect_galaxies, galaxy_from_legacy, galaxy_from_ned, LS_DR10, LS_DR9, NED};
-pub use config::HostGalaxyConfig;
+pub use config::{HostGalaxyConfig, Ps1FallbackConfig};
 pub use dlr::{compute_dlr, DlrResult};
 pub use ellipse::Ellipse;
 pub use error::HostError;
@@ -90,6 +91,13 @@ pub async fn associate_with_photometry(
     db: &mongodb::Database,
 ) -> Option<HostGalaxyAssociation> {
     let mut association = associate_from_xmatches(ra, dec, xmatches, config)?;
+    if association.best_host.is_none() {
+        if let Some(fallback) =
+            ps1::associate(ra, dec, xmatches, config, survey, object_id, db).await
+        {
+            association = fallback;
+        }
+    }
     add_spectrum_at_host_center(
         &mut association,
         xmatches,

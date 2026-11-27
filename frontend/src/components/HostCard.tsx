@@ -7,6 +7,9 @@ function hostUrl(host: HostSummary): string | null {
     return `https://ned.ipac.caltech.edu/byname?objname=${encodeURIComponent(host.name)}`;
   }
   if (host.ra == null || host.dec == null) return null;
+  if (host.catalog === 'PS1_DR2_HOSTS') {
+    return `https://ps1images.stsci.edu/cgi-bin/ps1cutouts?pos=${host.ra}+${host.dec}&filter=color`;
+  }
   const layer = host.catalog === 'LSDR9' ? 'ls-dr9' : 'ls-dr10';
   return `https://www.legacysurvey.org/viewer?ra=${host.ra}&dec=${host.dec}&layer=${layer}&zoom=16&mark=${host.ra},${host.dec}`;
 }
@@ -28,7 +31,10 @@ function hostRows(host: HostSummary): [string, ReactNode][] {
   }
   if (host.catalog) rows.push(['Catalog', host.catalog]);
   if (host.z != null) {
-    rows.push(['Redshift', host.z_err != null ? `${host.z.toFixed(4)} ± ${host.z_err.toFixed(4)}` : host.z.toFixed(4)]);
+    const label = host.z_type === 'photometric' ? 'Photometric redshift'
+      : host.z_type === 'spectroscopic' ? 'Spectroscopic redshift'
+      : 'Redshift';
+    rows.push([label, host.z_err != null ? `${host.z.toFixed(4)} ± ${host.z_err.toFixed(4)}` : host.z.toFixed(4)]);
   }
   if (host.dist_mpc != null) rows.push(['Distance', `${host.dist_mpc.toFixed(1)} Mpc`]);
   const sep = `${host.sep_arcsec.toFixed(2)}″`;
