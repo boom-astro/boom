@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState, useEffect } from 'react';
+import React, { useId, useMemo, useRef, useState, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Maximize2, Info } from 'lucide-react';
@@ -64,6 +64,9 @@ function tnsOrigin(name: string | undefined, p: TnsPoint) {
 }
 
 function LightcurveInternal({ data, fitCurves, setExpandedDialogOpen, setHelpDialogOpen, height }: { data: LightcurveData, fitCurves: VillarCurve[], setExpandedDialogOpen?: (open: boolean) => void | null, setHelpDialogOpen: (open: boolean) => void, height?: string }) {
+    // The card and the expanded dialog both render this, and `url(#id)` resolves
+    // to the first element with that id in the document.
+    const clipId = `lc-plot-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
     const candidates: Detection[] = data?.prv_candidates ?? [];
     const fpHists: Detection[] = data?.fp_hists ?? [];
     const nondets: Detection[] = data?.prv_nondetections ?? [];
@@ -620,13 +623,13 @@ function LightcurveInternal({ data, fitCurves, setExpandedDialogOpen, setHelpDia
 
                 {/* plotting area clip */}
                 <defs>
-                    <clipPath id="plot-area">
+                    <clipPath id={clipId}>
                         <rect x={pad.left} y={pad.top} width={plotW} height={plotH} />
                     </clipPath>
                 </defs>
 
                 {/* points: detections error bars - rendered early so they're under the points */}
-                <g clipPath="url(#plot-area)" style={{ pointerEvents: 'none' }}>
+                <g clipPath={`url(#${clipId})`} style={{ pointerEvents: 'none' }}>
                     {detections.map((pt, i) => {
                         const { bandKey, isHidden, color } = getBandState(pt.band);
                         if (isHidden) return null;
@@ -645,7 +648,7 @@ function LightcurveInternal({ data, fitCurves, setExpandedDialogOpen, setHelpDia
                 </g>
 
                 {includeFit && (
-                    <g clipPath="url(#plot-area)" style={{ pointerEvents: 'none' }}>
+                    <g clipPath={`url(#${clipId})`} style={{ pointerEvents: 'none' }}>
                         {fitCurves.map(curve => {
                             const { bandKey, isHidden, color } = getBandState(curve.band);
                             if (isHidden) return null;
@@ -667,7 +670,7 @@ function LightcurveInternal({ data, fitCurves, setExpandedDialogOpen, setHelpDia
                 />
 
                 {/* Interactive circles and polygons - rendered after overlay so they're on top */}
-                <g clipPath="url(#plot-area)">
+                <g clipPath={`url(#${clipId})`}>
                 {detections.map((pt, i) => {
                     const { bandKey, isHidden, color } = getBandState(pt.band);
                     if (isHidden) return null;
@@ -729,7 +732,7 @@ function LightcurveInternal({ data, fitCurves, setExpandedDialogOpen, setHelpDia
                 </g>
 
                 {/* Interactive non-detection polygons */}
-                <g clipPath="url(#plot-area)">
+                <g clipPath={`url(#${clipId})`}>
                 {includeUpperLimits && nondetectionsSeries.map((pt, i) => {
                     const { bandKey, isHidden, color } = getBandState(pt.band);
                     if (isHidden) return null;
@@ -780,7 +783,7 @@ function LightcurveInternal({ data, fitCurves, setExpandedDialogOpen, setHelpDia
                 })}
                 </g>
 
-                <g clipPath="url(#plot-area)">
+                <g clipPath={`url(#${clipId})`}>
                 {tnsDetections.map((pt, i) => {
                     const { bandKey, isHidden, color } = getBandState(pt.band);
                     if (isHidden) return null;
