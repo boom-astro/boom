@@ -159,6 +159,8 @@ mod tests {
             redshift: None,
             redshift_err: None,
             redshift_type: None,
+            redshift_catalog: None,
+            redshift_source_id: None,
             dist_mpc: None,
             dist_mpc_method: None,
             mag: None,

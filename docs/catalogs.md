@@ -239,6 +239,38 @@ joined on an id. The ingest checks that before merging them, because a truncated
 download would otherwise attach each source to a different source's redshift and
 nothing downstream could tell.
 
+### Archival repeat radial velocities
+
+The `archival-repeat-rv` staged catalog ingests the ranked output from
+[`boom-catalogs`](https://github.com/boom-astro/boom-catalogs). Stage
+`candidates-v1.jsonl.gz` at
+`<catalog data path>/staged/archival-repeat-rv/` and run the catalog ingest
+task. The archive-wide scan reads the completed LAMOST, SDSS, and DESI
+metadata manifest and optionally a normalized public 4MOST visit export. It
+keeps archive FITS locators, RV frame and exposure duration where available
+for the best pair in each candidate.
+
+Authenticated BOOM users can query `Archival_Repeat_RV_v1` with
+`POST /queries/find` or `POST /queries/cone_search`. For example:
+
+```json
+{
+  "catalog_name": "Archival_Repeat_RV_v1",
+  "filter": {"comparison": "same_pipeline", "survey": "lamost", "n_visits": {"$gte": 3}},
+  "sort": {"pair_sigma": -1, "delta_km_s": -1, "_id": 1},
+  "limit": 100
+}
+```
+
+`pair_sigma` is a ranking statistic based on the visit uncertainties and
+instrument-specific error floors. A cross-survey pair has
+`comparison: "cross_pipeline"` and keeps the signed raw and corrected RV
+difference, calibration ID, and uncertainty components under `cross_pipeline`.
+Use the comparison filter to rank one category at a time.
+
+The catalog is available for direct
+queries and stays outside alert crossmatching.
+
 ### Staged catalogs
 
 A staged catalog is one BOOM ingests but does not fetch: the files are put in
@@ -587,3 +619,19 @@ treated as "already written", so a record whose `_id` is already present is
 re-ingest safe to repeat; they do not make it a way to refresh data. See
 [Re-ingesting a catalog](#re-ingesting-a-catalog).
 
+
+### Archival spectroscopy updates
+
+The `archival-spectrum-visits` and `archival-spectrum-objects` staged catalogs
+are produced by `export_archival_indices.py` in boom-catalogs. The two shard
+families are published under the same immutable revision directory in
+`staged/archival-spectroscopy/`. Run `catalog_ingest` for visits, then objects
+after the visits finish. New chunks resume alongside the prior collection
+contents. Rows use stable IDs and only a higher revision can replace an
+existing row, so a replay cannot roll back newer metadata.
+
+Query `Archival_Spectrum_Objects` for watchlist candidates, including candidates
+with zero spectra. Look up `Archival_Spectrum_Visits` by `object_id` for visit
+and coadd metadata, phase or RV gains when supplied, and FITS locators.
+Multiple rows can share a physical visit. Spectral pixels are fetched from the
+archival locators by clients as needed.

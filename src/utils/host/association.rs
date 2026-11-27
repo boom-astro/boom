@@ -41,6 +41,10 @@ pub struct StoredHostCandidate {
     pub z_err: Option<f64>,
     #[serde(default)]
     pub z_type: Option<String>,
+    #[serde(default)]
+    pub z_catalog: Option<String>,
+    #[serde(default)]
+    pub z_source_id: Option<String>,
     /// Adopted distance in Mpc, redshift-independent only when
     /// `dist_mpc_method` says so.
     pub dist_mpc: Option<f64>,
@@ -58,6 +62,20 @@ pub struct HostSummary {
     pub name: Option<String>,
     pub catalog: Option<String>,
     pub z: Option<f64>,
+    #[serde(default)]
+    pub z_err: Option<f64>,
+    #[serde(default)]
+    pub z_type: Option<String>,
+    #[serde(default)]
+    pub z_catalog: Option<String>,
+    #[serde(default)]
+    pub z_source_id: Option<String>,
+    #[serde(default)]
+    pub ra: Option<f64>,
+    #[serde(default)]
+    pub dec: Option<f64>,
+    #[serde(default)]
+    pub posterior: Option<f64>,
     pub dist_mpc: Option<f64>,
     pub dist_mpc_method: Option<String>,
     pub sep_arcsec: f64,
@@ -71,6 +89,13 @@ impl From<&StoredHostCandidate> for HostSummary {
             name: host.objname.clone(),
             catalog: host.catalog.clone(),
             z: host.z,
+            z_err: host.z_err,
+            z_type: host.z_type.clone(),
+            z_catalog: host.z_catalog.clone(),
+            z_source_id: host.z_source_id.clone(),
+            ra: Some(host.ra),
+            dec: Some(host.dec),
+            posterior: Some(host.posterior),
             dist_mpc: host.dist_mpc,
             dist_mpc_method: host.dist_mpc_method.clone(),
             sep_arcsec: host.sep_arcsec,
@@ -122,6 +147,8 @@ impl HostGalaxyAssociation {
                 z: c.galaxy.redshift,
                 z_err: c.galaxy.redshift_err,
                 z_type: c.galaxy.redshift_type.clone(),
+                z_catalog: c.galaxy.redshift_catalog.clone(),
+                z_source_id: c.galaxy.redshift_source_id.clone(),
                 dist_mpc: c.galaxy.dist_mpc,
                 dist_mpc_method: c.galaxy.dist_mpc_method.clone(),
                 a_arcsec: c.galaxy.a_arcsec,
@@ -168,6 +195,8 @@ mod tests {
             redshift: Some(0.004),
             redshift_err: Some(0.000_1),
             redshift_type: None,
+            redshift_catalog: None,
+            redshift_source_id: None,
             dist_mpc,
             dist_mpc_method: dist_mpc.map(|_| "zIndependent".to_string()),
             mag: None,

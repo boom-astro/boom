@@ -245,6 +245,8 @@ mod tests {
             z: None,
             z_err: None,
             z_type: None,
+            z_catalog: None,
+            z_source_id: None,
             dist_mpc: None,
             dist_mpc_method: None,
             a_arcsec: 20.0,

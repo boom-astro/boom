@@ -75,6 +75,7 @@ struct AlertsQuery {
     is_near_brightstar: Option<bool>,
     is_stationary: Option<bool>,
     max_host_dist_mpc: Option<f64>,
+    has_host_spectroscopic_redshift: Option<bool>,
     limit: Option<u32>,
     skip: Option<u64>,
 }
@@ -106,6 +107,7 @@ enum AlertsQueryResult {
         ("is_near_brightstar" = Option<bool>, Query, description = "Whether to filter for candidates near bright stars"),
         ("is_stationary" = Option<bool>, Query, description = "Whether to filter for stationary candidates"),
         ("max_host_dist_mpc" = Option<f64>, Query, description = "Maximum distance in Mpc of the best host galaxy"),
+        ("has_host_spectroscopic_redshift" = Option<bool>, Query, description = "Whether the best host has a positive spectroscopic redshift"),
         ("limit" = Option<u32>, Query, description = "Maximum number of alerts to return (1-100000, default 1000)"),
         ("skip" = Option<u64>, Query, description = "Number of alerts to skip (for pagination)"),
     ),
@@ -264,6 +266,18 @@ pub async fn get_alerts(
             "properties.best_host.dist_mpc",
             doc! { "$lte": max_host_dist_mpc },
         );
+    }
+
+    if let Some(required) = query.has_host_spectroscopic_redshift {
+        let spectroscopic = doc! {
+            "properties.best_host.z_type": "spectroscopic",
+            "properties.best_host.z": { "$gt": 0.0 },
+        };
+        if required {
+            filter_doc.extend(spectroscopic);
+        } else {
+            filter_doc.insert("$nor", vec![spectroscopic]);
+        }
     }
 
     // Sorting on _id makes Mongo walk the _id index over the whole collection.

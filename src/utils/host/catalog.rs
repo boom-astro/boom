@@ -96,6 +96,8 @@ pub fn galaxy_from_ned(doc: &Document, config: &HostGalaxyConfig) -> Option<Gala
         redshift: opt_f64(doc, "z"),
         redshift_err: opt_f64(doc, "z_unc"),
         redshift_type: ned_redshift_type(doc),
+        redshift_catalog: opt_f64(doc, "z").map(|_| config.ned_catalog.clone()),
+        redshift_source_id: opt_objname(doc, "_id"),
         dist_mpc: opt_f64(doc, "DistMpc"),
         dist_mpc_method: opt_string(doc, "DistMpc_method"),
         mag: opt_f64(doc, "m_Ks"),
@@ -230,6 +232,8 @@ pub fn galaxy_from_legacy(
         redshift,
         redshift_err,
         redshift_type: redshift_type.map(String::from),
+        redshift_catalog: redshift.map(|_| catalog.to_string()),
+        redshift_source_id: redshift.and_then(|_| opt_objname(doc, "_id")),
         dist_mpc: None,
         dist_mpc_method: None,
         mag: None,
@@ -362,6 +366,8 @@ pub(super) fn add_spectroscopic_redshift(
         galaxy.redshift = opt_f64(doc, "z");
         galaxy.redshift_err = opt_f64(doc, "zerr");
         galaxy.redshift_type = Some(SPECTROSCOPIC.to_string());
+        galaxy.redshift_catalog = Some(config.desi_catalog.clone());
+        galaxy.redshift_source_id = opt_objname(doc, "_id");
     }
 }
 
@@ -381,6 +387,8 @@ fn add_ned_redshift(galaxy: &mut GalaxyCandidate, ned: &[Document], config: &Hos
     galaxy.redshift = opt_f64(doc, "z");
     galaxy.redshift_err = opt_f64(doc, "z_unc");
     galaxy.redshift_type = Some(SPECTROSCOPIC.to_string());
+    galaxy.redshift_catalog = Some(config.ned_catalog.clone());
+    galaxy.redshift_source_id = opt_objname(doc, "_id");
     if galaxy.dist_mpc.is_none() {
         galaxy.dist_mpc = opt_f64(doc, "DistMpc");
         galaxy.dist_mpc_method = opt_string(doc, "DistMpc_method");

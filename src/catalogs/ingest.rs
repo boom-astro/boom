@@ -5,7 +5,8 @@
 //! between catalogs.
 
 use crate::utils::spatial::Coordinates;
-use mongodb::bson::{to_document, Document};
+use mongodb::bson::{doc, to_document, Document};
+use mongodb::options::{UpdateModifications, UpdateOneModel, WriteModel};
 use mongodb::{Collection, Database};
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,6 +101,7 @@ pub struct Inserter {
     /// while a chunk is still running. A chunk of a large catalog takes minutes,
     /// and without this the only feedback until it finishes is the log.
     inserted: Arc<AtomicU64>,
+    versioned: bool,
 }
 
 /// What one pool of workers did, summed over the pool.
@@ -144,7 +146,13 @@ impl Inserter {
             batch_size: batch_size.max(1),
             channel_capacity: channel_capacity.max(1),
             inserted: Arc::new(AtomicU64::new(0)),
+            versioned: false,
         }
+    }
+
+    pub fn with_versioned_updates(mut self) -> Self {
+        self.versioned = true;
+        self
     }
 
     /// A handle on the running total, for a caller that wants to publish it on
@@ -185,9 +193,10 @@ impl Inserter {
             let batch_size = self.batch_size;
             let inserted = self.inserted.clone();
             let off_sphere = off_sphere.clone();
+            let versioned = self.versioned;
             workers.push(tokio::spawn(async move {
                 insert_worker(
-                    worker_id, receiver, collection, batch_size, inserted, off_sphere,
+                    worker_id, receiver, collection, batch_size, inserted, off_sphere, versioned,
                 )
                 .await
             }));
@@ -253,6 +262,7 @@ async fn insert_worker<T>(
     batch_size: usize,
     inserted_total: Arc<AtomicU64>,
     off_sphere: Arc<AtomicU64>,
+    versioned: bool,
 ) -> Result<Tally, IngestError>
 where
     T: Serialize + HasCoordinates,
@@ -293,13 +303,15 @@ where
                 std::mem::take(&mut batch),
                 worker_id,
                 &inserted_total,
+                versioned,
             )
             .await?;
             batch.reserve(batch_size);
         }
     }
     if !batch.is_empty() {
-        tally.inserted += write_batch(&collection, batch, worker_id, &inserted_total).await?;
+        tally.inserted +=
+            write_batch(&collection, batch, worker_id, &inserted_total, versioned).await?;
     }
     Ok(tally)
 }
@@ -316,7 +328,28 @@ async fn write_batch(
     batch: Vec<Document>,
     worker_id: usize,
     inserted_total: &AtomicU64,
+    versioned: bool,
 ) -> Result<u64, IngestError> {
+    if versioned {
+        let models: Vec<WriteModel> = batch
+            .into_iter()
+            .map(|record| versioned_write(collection, record))
+            .collect::<Result<_, _>>()?;
+        let result = collection
+            .client()
+            .bulk_write(models)
+            .ordered(false)
+            .await?;
+        let inserted = result.upserted_count as u64;
+        tracing::debug!(
+            worker_id,
+            inserted,
+            updated = result.modified_count,
+            "applied catalog revisions"
+        );
+        inserted_total.fetch_add(inserted, Ordering::Relaxed);
+        return Ok(inserted);
+    }
     let n = batch.len() as u64;
     let opts = mongodb::options::InsertManyOptions::builder()
         .ordered(false)
@@ -348,6 +381,35 @@ async fn write_batch(
     }
 }
 
+fn versioned_write(
+    collection: &Collection<Document>,
+    record: Document,
+) -> Result<WriteModel, IngestError> {
+    let id = record
+        .get_str("_id")
+        .map_err(|_| IngestError::Read("versioned catalog record needs a string _id".into()))?;
+    let revision = record
+        .get_i64("revision")
+        .ok()
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            IngestError::Read("versioned catalog record needs a nonnegative revision".into())
+        })?;
+    Ok(UpdateOneModel::builder()
+        .namespace(collection.namespace())
+        .filter(doc! { "_id": id })
+        .update(UpdateModifications::Pipeline(vec![doc! {
+            "$replaceWith": { "$cond": [
+                { "$lt": [{ "$ifNull": ["$revision", -1] }, revision] },
+                { "$literal": record },
+                "$$ROOT"
+            ]}
+        }]))
+        .upsert(true)
+        .build()
+        .into())
+}
+
 /// `Some(n)` when every write error in the failure was a duplicate key (11000).
 fn duplicate_key_count(error: &mongodb::error::Error) -> Option<usize> {
     match *error.kind {
@@ -370,6 +432,42 @@ fn duplicate_key_count(error: &mongodb::error::Error) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn spectroscopy_replay_keeps_newer_revision() {
+        let db = crate::conf::get_test_db().await;
+        let collection = db.collection::<Document>("test_spectroscopy_revision_upsert");
+        collection.drop().await.unwrap();
+        let count = AtomicU64::new(0);
+        let seed = doc! {"_id":"gaia-dr3:123", "revision":1_i64, "independent_visits":0};
+        let gained = doc! {"_id":"gaia-dr3:123", "revision":2_i64, "independent_visits":1};
+        assert_eq!(
+            write_batch(&collection, vec![seed.clone()], 0, &count, true)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            write_batch(&collection, vec![gained.clone()], 0, &count, true)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            write_batch(&collection, vec![seed, gained], 0, &count, true)
+                .await
+                .unwrap(),
+            0
+        );
+        let result = collection
+            .find_one(doc! {"_id":"gaia-dr3:123"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.get_i64("revision").unwrap(), 2);
+        assert_eq!(result.get_i32("independent_visits").unwrap(), 1);
+        collection.drop().await.unwrap();
+    }
 
     /// A record with sky coordinates, to exercise the `coordinates` subdocument.
     #[derive(Serialize)]
