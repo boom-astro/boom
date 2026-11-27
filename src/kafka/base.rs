@@ -982,15 +982,17 @@ async fn largest_queue_length(
     Ok(largest)
 }
 
-async fn push_to_queue(
+/// Packets go in at the head and the alert worker pops the tail, so they are
+/// processed in the order they arrived, as in every other BOOM queue.
+pub(crate) async fn push_to_queue(
     con: &redis::aio::MultiplexedConnection,
     queue: &str,
     payload: &[u8],
 ) -> Result<usize, redis::RedisError> {
-    retry_valkey("valkey_rpush", || {
+    retry_valkey("valkey_lpush", || {
         let mut con = con.clone();
         async move {
-            con.rpush::<&str, Vec<u8>, usize>(queue, payload.to_vec())
+            con.lpush::<&str, Vec<u8>, usize>(queue, payload.to_vec())
                 .await
         }
     })
