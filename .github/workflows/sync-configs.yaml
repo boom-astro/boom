@@ -37,6 +37,8 @@ jobs:
 
       - name: Configure Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Create and check prod configs
         run: make check-configs

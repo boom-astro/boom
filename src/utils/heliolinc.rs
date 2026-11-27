@@ -9,22 +9,33 @@
 //! unrelated ones scatter. Sweeping a grid of assumptions and clustering the
 //! propagated states is then the whole method (Holman et al. 2018).
 
-use crate::utils::linking::{night_of, Detection, Tracklet};
-use crate::utils::orbit_fit::{fit_orbit, rms_arcsec, Observation};
+use crate::utils::linking::{angular_separation_deg, Detection, Tracklet};
+use crate::utils::orbit_fit::{
+    converge_orbit, fit_orbit_with, keeps_unbound, predict_radec, rms_arcsec, GiveUp, Observation,
+    CONVERGE_ITERATIONS, SCREEN_ITERATIONS,
+};
+use crate::utils::outburst::{hg12, DEFAULT_G12};
 use crate::utils::sso_geometry::{
-    dot, earth_position, heliocentric_position, norm, OrbitalElements, Site, ZTF,
+    dot, earth_position_utc, norm, OrbitalElements, Site, PARABOLIC_TOLERANCE, ZTF,
 };
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Heliocentric gravitational parameter, au^3/day^2.
-const MU: f64 = 0.017_202_098_95 * 0.017_202_098_95;
+pub(crate) const MU: f64 = 0.017_202_098_95 * 0.017_202_098_95;
 /// Obliquity of the ecliptic at J2000, degrees.
 const OBLIQUITY_DEG: f64 = 23.439_281;
 /// Step for differencing Earth's position, days.
 const EARTH_DERIV_STEP: f64 = 0.5;
+/// Eccentricity below which an orbit is treated as circular. Ignoring it moves
+/// a main-belt position by well under a milliarcsecond.
+const CIRCULAR_ECCENTRICITY: f64 = 1e-10;
+/// Kilometers per second in one au/day.
+pub const KM_S_PER_AU_DAY: f64 = 1_731.456_829;
+const UNIVERSAL_TOLERANCE: f64 = 1e-13;
+const UNIVERSAL_MAX_ITER: usize = 100;
 
-/// One assumed heliocentric distance and radial velocity.
+/// One assumed heliocentric distance and radial velocity at the reference epoch.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hypothesis {
     /// Heliocentric distance, au.
@@ -38,6 +49,51 @@ pub struct Hypothesis {
 pub struct State {
     pub pos: [f64; 3],
     pub vel: [f64; 3],
+}
+
+fn energy(state: &State) -> f64 {
+    dot(&state.vel, &state.vel) / 2.0 - MU / norm(&state.pos)
+}
+
+pub fn is_bound(state: &State) -> bool {
+    energy(state) < 0.0
+}
+
+/// The orbits a search or a fit may use.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum Conics {
+    #[default]
+    Bound,
+    /// Hyperbolae too, up to `vinf_au_per_day` of excess speed, an unbound fit
+    /// standing only if it leaves at most `max_rms_arcsec`.
+    Unbound {
+        vinf_au_per_day: f64,
+        max_rms_arcsec: f64,
+    },
+}
+
+impl Conics {
+    /// Unbound for a positive `vinf_au_per_day`, bound otherwise.
+    pub fn up_to(vinf_au_per_day: f64, max_rms_arcsec: f64) -> Self {
+        if vinf_au_per_day > 0.0 {
+            Conics::Unbound {
+                vinf_au_per_day,
+                max_rms_arcsec,
+            }
+        } else {
+            Conics::Bound
+        }
+    }
+
+    pub fn admits(self, state: &State) -> bool {
+        match self {
+            Conics::Bound => is_bound(state),
+            Conics::Unbound {
+                vinf_au_per_day: vinf,
+                ..
+            } => energy(state) < vinf * vinf / 2.0,
+        }
+    }
 }
 
 /// Tracklets that agree on a state once propagated to a common epoch.
@@ -76,11 +132,23 @@ pub struct LinkConfig {
     /// Where the astrometry was taken from. An Earth radius is several
     /// arcseconds at these distances, so the fit is not site-independent.
     pub site: Site,
+    /// Which states are clustered and which orbits their fits may reach.
+    pub conics: Conics,
 }
 
 /// Largest radial velocity a bound object can have at `r_au`, au/day.
 fn escape_speed(r_au: f64) -> f64 {
     (2.0 * MU / r_au).sqrt()
+}
+
+/// `state` slowed to just under escape speed, to seed a bound fit.
+pub fn bound_seed(state: &State) -> State {
+    let limit = 0.98 * escape_speed(norm(&state.pos));
+    let scale = (limit / norm(&state.vel)).min(1.0);
+    State {
+        pos: state.pos,
+        vel: state.vel.map(|v| v * scale),
+    }
 }
 
 /// Hypotheses over `distances` heliocentric distances from `first_au` to
@@ -98,20 +166,50 @@ fn hypothesis_grid(
     baseline_days: f64,
     tol_au: f64,
 ) -> Vec<Hypothesis> {
+    radial_grid(
+        first_au,
+        last_au,
+        distances,
+        baseline_days,
+        tol_au,
+        |r_au| (None, 0.98 * escape_speed(r_au)),
+    )
+}
+
+fn radial_grid(
+    first_au: f64,
+    last_au: f64,
+    distances: u32,
+    baseline_days: f64,
+    tol_au: f64,
+    band: impl Fn(f64) -> (Option<f64>, f64),
+) -> Vec<Hypothesis> {
     let step = (tol_au / baseline_days).max(f64::MIN_POSITIVE);
     let ratio = (last_au / first_au).powf(1.0 / f64::from(distances.saturating_sub(1).max(1)));
     let mut out = Vec::new();
     for i in 0..distances {
         let r_au = first_au * ratio.powi(i as i32);
-        let limit = 0.98 * escape_speed(r_au);
+        let (above, limit) = band(r_au);
         let arms = (limit / step).floor() as i64;
-        for k in -arms..=arms {
+        let inner = above.map_or(-1, |lo| (lo / step).floor() as i64);
+        for k in (-arms..=arms).filter(|k| k.abs() > inner) {
             out.push(Hypothesis {
                 r_au,
                 rdot_au_per_day: step * k as f64,
             });
         }
     }
+    out
+}
+
+/// Radial velocities past the bound grids, up to excess speed `vinf_au_per_day`.
+pub fn unbound_hypotheses(vinf_au_per_day: f64) -> Vec<Hypothesis> {
+    let band = |r_au: f64| {
+        let escape = escape_speed(r_au);
+        (Some(0.98 * escape), escape.hypot(vinf_au_per_day.max(0.0)))
+    };
+    let mut out = radial_grid(1.1, 5.6, 18, 7.0, 0.002, band);
+    out.extend(radial_grid(1.5, 9.5, 29, 7.0, 0.002, band));
     out
 }
 
@@ -146,12 +244,27 @@ impl Default for LinkConfig {
             min_nights: 2,
             max_residual_arcsec: 2.0,
             site: ZTF,
+            conics: Conics::Bound,
         }
     }
 }
 
+impl LinkConfig {
+    /// Search `conics`, adding the unbound hypotheses when they are unbound.
+    pub fn with_conics(mut self, conics: Conics) -> Self {
+        if let Conics::Unbound {
+            vinf_au_per_day, ..
+        } = conics
+        {
+            self.hypotheses.extend(unbound_hypotheses(vinf_au_per_day));
+        }
+        self.conics = conics;
+        self
+    }
+}
+
 /// Equatorial degrees to an ecliptic unit vector.
-fn unit_vector(ra_deg: f64, dec_deg: f64) -> [f64; 3] {
+pub(crate) fn unit_vector(ra_deg: f64, dec_deg: f64) -> [f64; 3] {
     let (ra, dec) = (ra_deg.to_radians(), dec_deg.to_radians());
     let (x, y, z) = (dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin());
     let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
@@ -198,54 +311,114 @@ fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
 
 /// Earth's heliocentric velocity, au/day, by central difference.
 fn earth_velocity(jd: f64) -> [f64; 3] {
-    let a = earth_position(jd - EARTH_DERIV_STEP);
-    let b = earth_position(jd + EARTH_DERIV_STEP);
+    let a = earth_position_utc(jd - EARTH_DERIV_STEP);
+    let b = earth_position_utc(jd + EARTH_DERIV_STEP);
     let d = 2.0 * EARTH_DERIV_STEP;
     [(b[0] - a[0]) / d, (b[1] - a[1]) / d, (b[2] - a[2]) / d]
 }
 
-/// The heliocentric state a tracklet implies under `h`.
-///
-/// The distance along the line of sight follows from placing the object on a
-/// sphere of radius `r_au`; the range rate then follows from requiring the
-/// heliocentric radial velocity to be `rdot_au_per_day`.
-pub fn state_from_tracklet(t: &Tracklet, h: &Hypothesis) -> Option<State> {
-    let rho = unit_vector(t.ra_ref, t.dec_ref);
-    let rho_dot = unit_vector_rate(t);
-    let e_pos = earth_position(t.jd_ref);
-    let e_vel = earth_velocity(t.jd_ref);
-
-    // |E + d rho| = r, taking the root in front of the observer.
-    let b = dot(&e_pos, &rho);
-    let c = dot(&e_pos, &e_pos) - h.r_au * h.r_au;
-    let disc = b * b - c;
-    if disc < 0.0 {
-        return None;
-    }
-    let d = -b + disc.sqrt();
-    if d <= 0.0 {
-        return None;
-    }
-
-    let pos = [
-        e_pos[0] + d * rho[0],
-        e_pos[1] + d * rho[1],
-        e_pos[2] + d * rho[2],
-    ];
-    let denom = dot(&pos, &rho);
-    if denom.abs() < 1e-9 {
-        return None;
-    }
-    let d_dot = (h.r_au * h.rdot_au_per_day - dot(&pos, &e_vel) - d * dot(&pos, &rho_dot)) / denom;
-    let vel = [
-        e_vel[0] + d_dot * rho[0] + d * rho_dot[0],
-        e_vel[1] + d_dot * rho[1] + d * rho_dot[1],
-        e_vel[2] + d_dot * rho[2] + d * rho_dot[2],
-    ];
-    Some(State { pos, vel })
+struct Sight {
+    rho: [f64; 3],
+    rho_dot: [f64; 3],
+    earth: [f64; 3],
+    earth_vel: [f64; 3],
 }
 
-/// Osculating elements for a bound state, or `None` when it is not an ellipse.
+impl Sight {
+    fn of(t: &Tracklet) -> Self {
+        Sight {
+            rho: unit_vector(t.ra_ref, t.dec_ref),
+            rho_dot: unit_vector_rate(t),
+            earth: earth_position_utc(t.jd_ref),
+            earth_vel: earth_velocity(t.jd_ref),
+        }
+    }
+
+    /// The heliocentric state at distance `r_au` and radial velocity
+    /// `rdot_au_per_day`.
+    ///
+    /// The distance along the line of sight follows from placing the object on
+    /// a sphere of radius `r_au`; the range rate then follows from requiring the
+    /// heliocentric radial velocity.
+    fn state(&self, r_au: f64, rdot_au_per_day: f64) -> Option<State> {
+        let (rho, rho_dot, e_pos, e_vel) = (&self.rho, &self.rho_dot, &self.earth, &self.earth_vel);
+        // |E + d rho| = r, taking the root in front of the observer.
+        let b = dot(e_pos, rho);
+        let c = dot(e_pos, e_pos) - r_au * r_au;
+        let disc = b * b - c;
+        if disc < 0.0 {
+            return None;
+        }
+        let d = -b + disc.sqrt();
+        if d <= 0.0 {
+            return None;
+        }
+
+        let pos = [
+            e_pos[0] + d * rho[0],
+            e_pos[1] + d * rho[1],
+            e_pos[2] + d * rho[2],
+        ];
+        let denom = dot(&pos, rho);
+        if denom.abs() < 1e-9 {
+            return None;
+        }
+        let d_dot = (r_au * rdot_au_per_day - dot(&pos, e_vel) - d * dot(&pos, rho_dot)) / denom;
+        let vel = [
+            e_vel[0] + d_dot * rho[0] + d * rho_dot[0],
+            e_vel[1] + d_dot * rho[1] + d * rho_dot[1],
+            e_vel[2] + d_dot * rho[2] + d * rho_dot[2],
+        ];
+        Some(State { pos, vel })
+    }
+
+    /// The state under `h`, which holds at the reference epoch `dt` days away.
+    /// L^2 is solved by secant: plain iteration oscillates for nearby objects.
+    fn state_under(&self, h: &Hypothesis, dt: f64) -> Option<State> {
+        let (r0, rdot0) = (h.r_au, h.rdot_au_per_day);
+        let at = |l2: f64| {
+            let accel = (l2 / r0 - MU) / (r0 * r0);
+            let jerk = (2.0 * MU - 3.0 * l2 / r0) / r0.powi(3) * rdot0;
+            let r = r0 + dt * (rdot0 + dt * (accel / 2.0 + dt * jerk / 6.0));
+            if r <= 0.0 {
+                return None;
+            }
+            self.state(r, rdot0 + dt * (accel + dt * jerk / 2.0))
+        };
+        let excess = |l2: f64, s: &State| {
+            let h_vec = cross(&s.pos, &s.vel);
+            dot(&h_vec, &h_vec) - l2
+        };
+        if dt == 0.0 {
+            return at(0.0);
+        }
+        let (mut x0, s0) = (0.0, at(0.0)?);
+        let mut f0 = excess(x0, &s0);
+        let mut x1 = f0;
+        let Some(mut s1) = at(x1) else {
+            return Some(s0);
+        };
+        for _ in 0..4 {
+            let f1 = excess(x1, &s1);
+            if f1 == f0 || f1.abs() <= 1e-9 * x1 {
+                break;
+            }
+            let x2 = (x1 - f1 * (x1 - x0) / (f1 - f0)).max(0.0);
+            let Some(s2) = at(x2) else {
+                break;
+            };
+            (x0, f0, x1, s1) = (x1, f1, x2, s2);
+        }
+        Some(s1)
+    }
+}
+
+/// The heliocentric state a tracklet implies under `h` at its own epoch.
+pub fn state_from_tracklet(t: &Tracklet, h: &Hypothesis) -> Option<State> {
+    Sight::of(t).state(h.r_au, h.rdot_au_per_day)
+}
+
+/// Osculating elements for a state on any conic, or `None` when it is degenerate.
 pub fn state_to_elements(state: &State, epoch_jd: f64) -> Option<OrbitalElements> {
     let r = norm(&state.pos);
     let v2 = dot(&state.vel, &state.vel);
@@ -253,10 +426,6 @@ pub fn state_to_elements(state: &State, epoch_jd: f64) -> Option<OrbitalElements
         return None;
     }
     let energy = v2 / 2.0 - MU / r;
-    if energy >= 0.0 {
-        return None;
-    }
-    let a = -MU / (2.0 * energy);
 
     let h_vec = cross(&state.pos, &state.vel);
     let h_norm = norm(&h_vec);
@@ -271,16 +440,50 @@ pub fn state_to_elements(state: &State, epoch_jd: f64) -> Option<OrbitalElements
         (v2 - MU / r) * state.pos[2] / MU - rv * state.vel[2] / MU,
     ];
     let e = norm(&e_vec);
-    if !(0.0..1.0).contains(&e) {
+    if !e.is_finite() {
         return None;
     }
 
     let incl = (h_vec[2] / h_norm).clamp(-1.0, 1.0).acos();
     let n_vec = [-h_vec[1], h_vec[0], 0.0];
     let n_norm = norm(&n_vec);
+    let equatorial = n_norm < 1e-12;
+
+    // A circular orbit has no perihelion, and the angles measured from it
+    // divide by e. The trial orbits THOR searches with are circular by
+    // construction and often come out at exactly e = 0, which left every
+    // position propagated from them NaN. Put perihelion on the node line, or
+    // on the origin of longitude when the node is undefined too, and measure
+    // the anomaly from there.
+    if e < CIRCULAR_ECCENTRICITY {
+        let a = -MU / (2.0 * energy);
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let (node, nu) = if equatorial {
+            // Retrograde, the rotation into the ecliptic mirrors y.
+            let y = state.pos[1] * h_vec[2].signum();
+            (0.0, y.atan2(state.pos[0]))
+        } else {
+            let mut u = (dot(&n_vec, &state.pos) / (n_norm * r))
+                .clamp(-1.0, 1.0)
+                .acos();
+            if state.pos[2] < 0.0 {
+                u = two_pi - u;
+            }
+            (n_vec[1].atan2(n_vec[0]), u)
+        };
+        return Some(OrbitalElements::elliptical(
+            epoch_jd,
+            a,
+            0.0,
+            incl.to_degrees(),
+            node.to_degrees().rem_euclid(360.0),
+            0.0,
+            nu.to_degrees().rem_euclid(360.0),
+        ));
+    }
 
     // At zero inclination the node is undefined; put it at the origin of longitude.
-    let (node, peri) = if n_norm < 1e-12 {
+    let (node, peri) = if equatorial {
         (0.0, e_vec[1].atan2(e_vec[0]))
     } else {
         let node = n_vec[1].atan2(n_vec[0]);
@@ -295,46 +498,235 @@ pub fn state_to_elements(state: &State, epoch_jd: f64) -> Option<OrbitalElements
     if rv < 0.0 {
         nu = 2.0 * std::f64::consts::PI - nu;
     }
-    // True to eccentric to mean anomaly.
-    let ecc_anom =
-        2.0 * ((1.0 - e).sqrt() * (nu / 2.0).sin()).atan2((1.0 + e).sqrt() * (nu / 2.0).cos());
-    let mean_anom = ecc_anom - e * ecc_anom.sin();
 
-    Some(OrbitalElements::elliptical(
+    if e < 1.0 - PARABOLIC_TOLERANCE {
+        let a = -MU / (2.0 * energy);
+        // True to eccentric to mean anomaly.
+        let ecc_anom =
+            2.0 * ((1.0 - e).sqrt() * (nu / 2.0).sin()).atan2((1.0 + e).sqrt() * (nu / 2.0).cos());
+        let mean_anom = ecc_anom - e * ecc_anom.sin();
+        return Some(OrbitalElements::elliptical(
+            epoch_jd,
+            a,
+            e,
+            incl.to_degrees(),
+            node.to_degrees().rem_euclid(360.0),
+            peri.to_degrees().rem_euclid(360.0),
+            mean_anom.to_degrees().rem_euclid(360.0),
+        ));
+    }
+
+    let q = h_norm * h_norm / (MU * (1.0 + e));
+    let k = MU.sqrt();
+    let half = (nu / 2.0).tan();
+    let (a, mean_anom, since_perihelion) = if e <= 1.0 + PARABOLIC_TOLERANCE {
+        (
+            f64::INFINITY,
+            0.0,
+            (2.0 * q.powi(3)).sqrt() * (half + half.powi(3) / 3.0) / k,
+        )
+    } else {
+        let a = -MU / (2.0 * energy);
+        let hyp_anom = 2.0 * (((e - 1.0) / (e + 1.0)).sqrt() * half).atanh();
+        let mean_anom = e * hyp_anom.sinh() - hyp_anom;
+        (a, mean_anom, mean_anom * (-a).powf(1.5) / k)
+    };
+    if !since_perihelion.is_finite() {
+        return None;
+    }
+    Some(OrbitalElements {
         epoch_jd,
         a,
         e,
-        incl.to_degrees(),
-        node.to_degrees().rem_euclid(360.0),
-        peri.to_degrees().rem_euclid(360.0),
-        mean_anom.to_degrees().rem_euclid(360.0),
-    ))
+        incl: incl.to_degrees(),
+        node: node.to_degrees().rem_euclid(360.0),
+        peri: peri.to_degrees().rem_euclid(360.0),
+        mean_anomaly: mean_anom.to_degrees(),
+        q,
+        tp: epoch_jd - since_perihelion,
+    })
+}
+
+/// Stumpff's c2 and c3.
+fn stumpff(z: f64) -> (f64, f64) {
+    if z.abs() < 0.1 {
+        // The closed forms cancel near zero.
+        let (mut c2, mut c3, mut t2, mut t3) = (0.0, 0.0, 0.5, 1.0 / 6.0);
+        for k in 0..7 {
+            c2 += t2;
+            c3 += t3;
+            let k = f64::from(k);
+            t2 *= -z / ((2.0 * k + 3.0) * (2.0 * k + 4.0));
+            t3 *= -z / ((2.0 * k + 4.0) * (2.0 * k + 5.0));
+        }
+        (c2, c3)
+    } else if z > 0.0 {
+        let s = z.sqrt();
+        ((1.0 - s.cos()) / z, (s - s.sin()) / (z * s))
+    } else {
+        let s = (-z).sqrt();
+        ((s.cosh() - 1.0) / -z, (s.sinh() - s) / (-z * s))
+    }
+}
+
+/// Two-body state `dt` days on, by universal variables.
+fn kepler(state: &State, dt: f64) -> Option<State> {
+    let (r0v, v0v) = (&state.pos, &state.vel);
+    let r0 = norm(r0v);
+    if r0.is_nan() || r0 <= 0.0 {
+        return None;
+    }
+    let k = MU.sqrt();
+    let sigma = dot(r0v, v0v) / k;
+    let alpha = 2.0 / r0 - dot(v0v, v0v) / MU;
+    let target = k * dt;
+    let (mut lo, mut hi) = if dt >= 0.0 {
+        (0.0, f64::INFINITY)
+    } else {
+        (f64::NEG_INFINITY, 0.0)
+    };
+    let mut chi = target / r0;
+    let mut converged = dt == 0.0;
+    for _ in 0..UNIVERSAL_MAX_ITER {
+        if converged {
+            break;
+        }
+        let z = alpha * chi * chi;
+        let (c2, c3) = stumpff(z);
+        let f = sigma * chi * chi * c2 + (1.0 - alpha * r0) * chi.powi(3) * c3 + r0 * chi - target;
+        if f == 0.0 {
+            converged = true;
+            break;
+        }
+        // Overflow only happens beyond the root.
+        if !f.is_finite() {
+            if dt >= 0.0 {
+                hi = chi;
+            } else {
+                lo = chi;
+            }
+        } else if f < 0.0 {
+            lo = chi;
+        } else {
+            hi = chi;
+        }
+        let slope = chi * chi * c2 + sigma * chi * (1.0 - z * c3) + r0 * (1.0 - z * c2);
+        let mut next = chi - f / slope;
+        if !(next > lo && next < hi) {
+            if !(lo.is_finite() && hi.is_finite()) {
+                return None;
+            }
+            next = 0.5 * (lo + hi);
+        }
+        converged = (next - chi).abs() <= UNIVERSAL_TOLERANCE * (1.0 + chi.abs());
+        chi = next;
+    }
+    if !converged {
+        return None;
+    }
+
+    let z = alpha * chi * chi;
+    let (c2, c3) = stumpff(z);
+    let f = 1.0 - chi * chi * c2 / r0;
+    let g = dt - chi.powi(3) * c3 / k;
+    let pos = [
+        f * r0v[0] + g * v0v[0],
+        f * r0v[1] + g * v0v[1],
+        f * r0v[2] + g * v0v[2],
+    ];
+    let r = norm(&pos);
+    let f_dot = k * chi * (z * c3 - 1.0) / (r * r0);
+    let g_dot = 1.0 - chi * chi * c2 / r;
+    let vel = [
+        f_dot * r0v[0] + g_dot * v0v[0],
+        f_dot * r0v[1] + g_dot * v0v[1],
+        f_dot * r0v[2] + g_dot * v0v[2],
+    ];
+    // A state the conic cannot place is no orbit, not one at NaN.
+    pos.iter()
+        .chain(&vel)
+        .all(|c| c.is_finite())
+        .then_some(State { pos, vel })
 }
 
 /// Propagate a state to `jd` on its own two-body orbit.
 pub fn propagate(state: &State, epoch_jd: f64, jd: f64) -> Option<State> {
-    let elements = state_to_elements(state, epoch_jd)?;
-    let pos = heliocentric_position(&elements, jd);
-    // Velocity by central difference, so one propagator serves both.
-    let step = 0.05;
-    let before = heliocentric_position(&elements, jd - step);
-    let after = heliocentric_position(&elements, jd + step);
-    let vel = [
-        (after[0] - before[0]) / (2.0 * step),
-        (after[1] - before[1]) / (2.0 * step),
-        (after[2] - before[2]) / (2.0 * step),
-    ];
-    Some(State { pos, vel })
+    kepler(state, jd - epoch_jd)
 }
 
 /// Position alone, for callers that discard the velocity.
-///
-/// A third of the work of [`propagate`], which differences two extra positions
-/// to get the velocity. The orbit-fit Jacobian calls this per observation per
-/// parameter per iteration, so the saving is the bulk of a fit.
 pub fn propagate_position(state: &State, epoch_jd: f64, jd: f64) -> Option<[f64; 3]> {
-    let elements = state_to_elements(state, epoch_jd)?;
-    Some(heliocentric_position(&elements, jd))
+    kepler(state, jd - epoch_jd).map(|s| s.pos)
+}
+
+const MAX_NIGHT_MAG_SPREAD: f64 = 3.0;
+
+/// MPC offsets taking a band to V, so nights observed in different bands compare.
+fn v_offset(band: Option<char>) -> f64 {
+    match band {
+        Some('g') => -0.35,
+        Some('r') => 0.14,
+        Some('i') => 0.32,
+        Some('z') => 0.26,
+        Some('y') => 0.32,
+        Some('G') => 0.28,
+        _ => 0.0,
+    }
+}
+
+pub fn night_magnitude_spread(
+    state: &State,
+    epoch_jd: f64,
+    detections: &[&Detection],
+) -> Option<f64> {
+    let mut by_night: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
+    for d in detections {
+        let (Some(mag), Some(p)) = (d.mag, propagate_position(state, epoch_jd, d.jd)) else {
+            continue;
+        };
+        let e = earth_position_utc(d.jd);
+        let to_object = [p[0] - e[0], p[1] - e[1], p[2] - e[2]];
+        let (r, delta) = (norm(&p), norm(&to_object));
+        let phase_deg = (dot(&p, &to_object) / (r * delta))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+            .min(150.0);
+        by_night.entry(d.night()).or_default().push(
+            mag + v_offset(d.band) - 5.0 * (r * delta).log10() - hg12(phase_deg, DEFAULT_G12),
+        );
+    }
+    let medians: Vec<f64> = by_night
+        .into_values()
+        .map(|mut v| {
+            v.sort_by(f64::total_cmp);
+            let n = v.len();
+            (v[(n - 1) / 2] + v[n / 2]) / 2.0
+        })
+        .collect();
+    let lo = medians.iter().copied().reduce(f64::min)?;
+    let hi = medians.iter().copied().reduce(f64::max)?;
+    (medians.len() > 1).then_some(hi - lo)
+}
+
+fn photometry_agrees(
+    track: &Track,
+    tracklets: &[Tracklet],
+    by_id: &HashMap<i64, &Detection>,
+    cfg: &LinkConfig,
+) -> bool {
+    let detections: Vec<&Detection> = track
+        .members
+        .iter()
+        .flat_map(|&m| {
+            tracklets[m]
+                .ids
+                .iter()
+                .filter_map(|id| by_id.get(id).copied())
+        })
+        .collect();
+    night_magnitude_spread(&track.state, cfg.reference_jd, &detections)
+        .is_none_or(|spread| spread <= MAX_NIGHT_MAG_SPREAD)
 }
 
 /// Where `state` appears on the sky at each of `jds`, degrees.
@@ -346,7 +738,7 @@ pub fn sky_track(state: &State, epoch_jd: f64, jds: &[f64]) -> Option<(Vec<f64>,
     let mut decs = Vec::with_capacity(jds.len());
     for &jd in jds {
         let p = propagate_position(state, epoch_jd, jd)?;
-        let e = earth_position(jd);
+        let e = earth_position_utc(jd);
         let (ra, dec) = radec_from_ecliptic(&[p[0] - e[0], p[1] - e[1], p[2] - e[2]]);
         ras.push(ra);
         decs.push(dec);
@@ -369,7 +761,7 @@ pub fn test_orbits(
     distances_au: &[f64],
 ) -> Vec<(State, f64)> {
     let look = unit_vector(ra_deg, dec_deg);
-    let earth = earth_position(epoch_jd);
+    let earth = earth_position_utc(epoch_jd);
     let mut out = Vec::new();
 
     for &r_au in distances_au {
@@ -406,6 +798,115 @@ pub fn test_orbits(
             speed * tangent[2] / n,
         ];
         out.push((State { pos, vel }, r_au));
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkyResolution {
+    pub rate_step_deg_per_day: f64,
+    pub max_rate_deg_per_day: f64,
+    pub curvature_deg_per_day2: f64,
+}
+
+const UNBOUND_TRIAL_AU: (f64, f64) = (2.5, 6.0);
+
+fn cell_centers(lo: f64, hi: f64, step: f64) -> impl Iterator<Item = f64> {
+    let n = ((hi - lo) / step).ceil().max(1.0) as usize;
+    (0..n).map(move |k| lo + (k as f64 + 0.5) * (hi - lo) / n as f64)
+}
+
+/// Unbound trial orbits through `(ra_deg, dec_deg)`, spaced as finely as `res` resolves.
+pub fn unbound_test_orbits(
+    ra_deg: f64,
+    dec_deg: f64,
+    epoch_jd: f64,
+    vinf_au_per_day: f64,
+    res: &SkyResolution,
+) -> Vec<State> {
+    let look = unit_vector(ra_deg, dec_deg);
+    let east = cross(&unit_vector(0.0, 90.0), &look);
+    let n = norm(&east);
+    if n < 1e-9 {
+        return Vec::new();
+    }
+    let east = [east[0] / n, east[1] / n, east[2] / n];
+    let north = cross(&look, &east);
+    let earth = earth_position_utc(epoch_jd);
+    let earth_vel = earth_velocity(epoch_jd);
+    let along = dot(&earth, &look);
+    let range = |r_au: f64| -along + (along * along - dot(&earth, &earth) + r_au * r_au).sqrt();
+    let (near, far) = (range(UNBOUND_TRIAL_AU.0), range(UNBOUND_TRIAL_AU.1));
+    if !(near > 0.0 && far > near) {
+        return Vec::new();
+    }
+
+    let step = res.rate_step_deg_per_day.to_radians();
+    let max_rate = res.max_rate_deg_per_day.to_radians();
+    let curvature = res.curvature_deg_per_day2.to_radians();
+    if !(step > 0.0 && curvature > 0.0) {
+        return Vec::new();
+    }
+    let reflex = MU * (dot(&earth, &earth) - along * along).max(0.0).sqrt() / norm(&earth).powi(3);
+    let inverse: Vec<f64> = cell_centers(1.0 / far, 1.0 / near, 4.0 * curvature / reflex).collect();
+    let across_earth = {
+        let a = dot(&earth_vel, &look);
+        [
+            earth_vel[0] - a * look[0],
+            earth_vel[1] - a * look[1],
+            earth_vel[2] - a * look[2],
+        ]
+    };
+
+    let reach = (max_rate / step).floor() as i64;
+    let mut out = Vec::new();
+    for i in -reach..=reach {
+        for j in -reach..=reach {
+            let (rate_e, rate_n) = (i as f64 * step, j as f64 * step);
+            let rate = rate_e.hypot(rate_n);
+            if rate > max_rate {
+                continue;
+            }
+            let range_rate_step = 2.0 * curvature / rate.max(step / 2.0);
+            for &x in &inverse {
+                let d = 1.0 / x;
+                let pos = [
+                    earth[0] + d * look[0],
+                    earth[1] + d * look[1],
+                    earth[2] + d * look[2],
+                ];
+                let across = [
+                    across_earth[0] + d * (rate_e * east[0] + rate_n * north[0]),
+                    across_earth[1] + d * (rate_e * east[1] + rate_n * north[1]),
+                    across_earth[2] + d * (rate_e * east[2] + rate_n * north[2]),
+                ];
+                let across2 = dot(&across, &across);
+                let escape2 = 2.0 * MU / norm(&pos);
+                let limit2 = escape2 + vinf_au_per_day * vinf_au_per_day;
+                if across2 >= limit2 {
+                    continue;
+                }
+                let (lo, hi) = (
+                    (escape2 - across2).max(0.0).sqrt(),
+                    (limit2 - across2).sqrt(),
+                );
+                let bands: &[(f64, f64)] = if lo > 0.0 {
+                    &[(-hi, -lo), (lo, hi)]
+                } else {
+                    &[(-hi, hi)]
+                };
+                for &(a, b) in bands {
+                    for v in cell_centers(a, b, range_rate_step * d) {
+                        let vel = [
+                            across[0] + v * look[0],
+                            across[1] + v * look[1],
+                            across[2] + v * look[2],
+                        ];
+                        out.push(State { pos, vel });
+                    }
+                }
+            }
+        }
     }
     out
 }
@@ -482,16 +983,20 @@ fn connected_group(
 /// assumption and clusters the result -- so the sweep parallelises over them.
 fn tracks_for_hypothesis(
     tracklets: &[Tracklet],
+    sights: &[Sight],
     hypothesis: &Hypothesis,
     cfg: &LinkConfig,
 ) -> Vec<Track> {
     let mut tracks: Vec<Track> = Vec::new();
     // Propagated state per tracklet under this hypothesis.
     let mut states: Vec<(usize, State)> = Vec::new();
-    for (i, t) in tracklets.iter().enumerate() {
-        let Some(s) = state_from_tracklet(t, hypothesis) else {
+    for (i, (t, sight)) in tracklets.iter().zip(sights).enumerate() {
+        let Some(s) = sight.state_under(hypothesis, t.jd_ref - cfg.reference_jd) else {
             continue;
         };
+        if !cfg.conics.admits(&s) {
+            continue;
+        }
         if let Some(p) = propagate(&s, t.jd_ref, cfg.reference_jd) {
             states.push((i, p));
         }
@@ -526,11 +1031,7 @@ fn tracks_for_hypothesis(
         }
 
         let members: Vec<usize> = group.iter().map(|&g| states[g].0).collect();
-        let nights = members
-            .iter()
-            .map(|&m| night_of(tracklets[m].jd_ref))
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let nights = nights_of(&members, tracklets).len();
         if nights < cfg.min_nights {
             continue;
         }
@@ -565,18 +1066,13 @@ fn tracks_for_hypothesis(
     tracks
 }
 
-/// Score a candidate by how well one orbit reproduces its members' positions.
-///
-/// A cluster in state space is only a claim that the tracklets agree under some
-/// assumed distance; fitting the sky positions tests that claim against the
-/// astrometry itself, which is what separates a real track from tracklets that
-/// happen to land near each other.
-fn score(
-    track: &mut Track,
+/// The positions a candidate's orbit is fitted to.
+fn observations_of(
+    track: &Track,
     tracklets: &[Tracklet],
     by_id: &HashMap<i64, &Detection>,
-    cfg: &LinkConfig,
-) {
+    site: &Site,
+) -> Vec<Observation> {
     // Every detection of every member. A tracklet's midpoint alone leaves a
     // two-tracklet track fitting six parameters to four residuals, which no
     // amount of iteration can determine, and the residual it reports is then
@@ -589,10 +1085,11 @@ fn score(
             jd: d.jd,
             ra: d.ra,
             dec: d.dec,
+            site: d.site.unwrap_or(*site),
         })
         .collect();
     // A tracklet built without its detections to hand still carries a midpoint.
-    let observations = if observations.len() >= track.members.len() {
+    if observations.len() >= track.members.len() {
         observations
     } else {
         track
@@ -602,20 +1099,612 @@ fn score(
                 jd: tracklets[m].jd_ref,
                 ra: tracklets[m].ra_ref,
                 dec: tracklets[m].dec_ref,
+                site: tracklets[m]
+                    .ids
+                    .iter()
+                    .find_map(|id| by_id.get(id).and_then(|d| d.site))
+                    .unwrap_or(*site),
             })
             .collect()
-    };
+    }
+}
 
-    track.residual_arcsec =
-        match fit_orbit(&observations, &track.state, cfg.reference_jd, 20, &cfg.site) {
-            Some(fit) => {
-                track.state = fit.state;
-                Some(fit.rms_arcsec)
+/// Score a candidate by how well one orbit reproduces its members' positions.
+///
+/// A cluster in state space is only a claim that the tracklets agree under some
+/// assumed distance; fitting the sky positions tests that claim against the
+/// astrometry itself, which is what separates a real track from tracklets that
+/// happen to land near each other.
+fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig, conics: Conics) {
+    // A fit still far above the gate after a few iterations is not going to
+    // pass it, and most candidates are like that.
+    let give_up = GiveUp::for_gate(gate_arcsec(observations, cfg));
+    track.residual_arcsec = match fit_orbit_with(
+        observations,
+        &track.state,
+        cfg.reference_jd,
+        SCREEN_ITERATIONS,
+        Some(give_up),
+        conics,
+    ) {
+        Some(fit) => {
+            track.state = fit.state;
+            Some(fit.rms_arcsec)
+        }
+        // Too few positions to refine six parameters, so take the state as it
+        // stands rather than discarding a candidate for being short.
+        None if conics.admits(&track.state) => {
+            rms_arcsec(&track.state, cfg.reference_jd, observations)
+        }
+        None => None,
+    };
+}
+
+/// The best-fitting copy of one set of tracklets whose orbit passes the gate,
+/// run to convergence.
+///
+/// Copies of a set differ in the hypothesis that clustered them, and a short
+/// arc's fit mostly keeps the distance it was seeded at: seeded far from the
+/// truth it settles into a worse, often near-parabolic, orbit however long it
+/// runs, and the tightest cluster is not reliably the nearest. So one copy per
+/// assumed distance is screened -- the tightest, since the radial velocity
+/// moves the fit far less -- and the best of those is converged, which makes
+/// the residual reported, persisted, and ranked on across sets the orbit's
+/// rather than one seed's. Only when none of them passes are the remaining
+/// copies tried, first to pass winning, so no set is lost that a copy could
+/// have passed. `None` when no copy passes.
+fn best_passing(
+    mut copies: Vec<Track>,
+    tracklets: &[Tracklet],
+    by_id: &HashMap<i64, &Detection>,
+    cfg: &LinkConfig,
+) -> Option<Track> {
+    // Every copy has the same members, so the same positions to fit.
+    let observations = observations_of(copies.first()?, tracklets, by_id, &cfg.site);
+    let gate = gate_arcsec(&observations, cfg);
+    // Stable, so equally tight copies keep their hypothesis order.
+    copies.sort_by(|a, b| a.rms_au.total_cmp(&b.rms_au));
+    let mut distances = std::collections::HashSet::new();
+    let (first, rest): (Vec<Track>, Vec<Track>) = copies.into_iter().partition(|copy| {
+        distances.insert((copy.hypothesis.r_au.to_bits(), is_bound(&copy.state)))
+    });
+    let bound_copies = |copies: &[Track]| -> Vec<Track> {
+        copies
+            .iter()
+            .filter(|copy| is_bound(&copy.state))
+            .cloned()
+            .collect()
+    };
+    let fallback = match cfg.conics {
+        Conics::Unbound { .. } => Some((bound_copies(&first), bound_copies(&rest))),
+        Conics::Bound => None,
+    };
+    let (track, screened) = settle(first, rest, &observations, cfg, cfg.conics);
+    let mut track = track.filter(|track| residual(track) <= gate)?;
+    if let Some((first, rest)) = fallback.filter(|_| !is_bound(&track.state)) {
+        // A search kept to ellipses screens these same bound copies.
+        let slowed: Vec<Track> = screened
+            .iter()
+            .chain([&track.state])
+            .filter(|state| !is_bound(state))
+            .map(|state| Track {
+                state: bound_seed(state),
+                ..track.clone()
+            })
+            .collect();
+        let (bound, _) = settle(
+            first.into_iter().chain(slowed).collect(),
+            rest,
+            &observations,
+            cfg,
+            Conics::Bound,
+        );
+        track = choose_conic(track, bound, &observations, cfg)?;
+    }
+    photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
+}
+
+fn residual(track: &Track) -> f64 {
+    track.residual_arcsec.unwrap_or(f64::INFINITY)
+}
+
+/// The copy of `first` that fits best under `conics`, or when it fails the gate
+/// the first of `rest` to pass, converged if it passes; and the states `first`
+/// screened to.
+fn settle(
+    first: Vec<Track>,
+    rest: Vec<Track>,
+    observations: &[Observation],
+    cfg: &LinkConfig,
+    conics: Conics,
+) -> (Option<Track>, Vec<State>) {
+    let gate = gate_arcsec(observations, cfg);
+    let screened: Vec<Track> = first
+        .into_iter()
+        .map(|mut copy| {
+            score(&mut copy, observations, cfg, conics);
+            copy
+        })
+        .collect();
+    let states = screened.iter().map(|copy| copy.state).collect();
+    let best = screened
+        .into_iter()
+        .min_by(|a, b| residual(a).total_cmp(&residual(b)));
+    let track = match best {
+        Some(track) if residual(&track) <= gate => Some(track),
+        best => rest
+            .into_iter()
+            .find_map(|mut copy| {
+                score(&mut copy, observations, cfg, conics);
+                (residual(&copy) <= gate).then_some(copy)
+            })
+            .or(best),
+    };
+    let track = track.map(|mut track| {
+        if residual(&track) <= gate {
+            converge(&mut track, observations, cfg, conics);
+        }
+        track
+    });
+    (track, states)
+}
+
+/// `track` if it is bound or [`keeps_unbound`] lets it stand against `bound`,
+/// otherwise `bound` if it passes the gate.
+fn choose_conic(
+    track: Track,
+    bound: Option<Track>,
+    observations: &[Observation],
+    cfg: &LinkConfig,
+) -> Option<Track> {
+    let against = bound.as_ref().map(|b| (residual(b), &b.state));
+    if is_bound(&track.state) || keeps_unbound(cfg.conics, residual(&track), against) {
+        return Some(track);
+    }
+    bound.filter(|b| residual(b) <= gate_arcsec(observations, cfg))
+}
+
+/// Run a track whose screening fit passed the gate on to convergence, so the
+/// residual it reports is its orbit's rather than one truncated fit's.
+fn converge(track: &mut Track, observations: &[Observation], cfg: &LinkConfig, conics: Conics) {
+    // The weighted optimum can raise the plain residual past the gate.
+    if let Some(fit) = converge_orbit(
+        observations,
+        &track.state,
+        cfg.reference_jd,
+        CONVERGE_ITERATIONS,
+        conics,
+    )
+    .filter(|fit| fit.rms_arcsec <= gate_arcsec(observations, cfg))
+    {
+        track.state = fit.state;
+        track.residual_arcsec = Some(fit.rms_arcsec);
+    }
+}
+
+/// The residual gate for `observations`: the configured one, widened to three
+/// sigma at any site whose astrometry is coarser, as its tracklets are.
+fn gate_arcsec(observations: &[Observation], cfg: &LinkConfig) -> f64 {
+    if observations.is_empty() {
+        return cfg.max_residual_arcsec;
+    }
+    let sum: f64 = observations
+        .iter()
+        .map(|obs| {
+            cfg.max_residual_arcsec
+                .max(3.0 * obs.site.astrometric_sigma_arcsec)
+                .powi(2)
+        })
+        .sum();
+    (sum / observations.len() as f64).sqrt()
+}
+
+/// Every candidate the hypothesis sweep produces, grouped by set of tracklets.
+///
+/// One object clusters under every hypothesis near its true distance, so the
+/// same set of tracklets arrives dozens to hundreds of times over, and fitting
+/// every copy was most of the cost of linking. Grouping lets each distinct set
+/// fit a few of its copies rather than all of them.
+fn candidate_sets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Vec<Track>> {
+    // Collected in hypothesis order, so the result does not depend on thread
+    // scheduling and deduplication stays reproducible.
+    let sights: Vec<Sight> = tracklets.par_iter().map(Sight::of).collect();
+    let candidates: Vec<Track> = cfg
+        .hypotheses
+        .par_iter()
+        .flat_map(|hypothesis| tracks_for_hypothesis(tracklets, &sights, hypothesis, cfg))
+        .collect();
+    // A BTreeMap keeps the order, and so deduplication, reproducible.
+    let mut sets: BTreeMap<Vec<usize>, Vec<Track>> = BTreeMap::new();
+    for candidate in candidates {
+        let mut key = candidate.members.clone();
+        key.sort_unstable();
+        sets.entry(key).or_default().push(candidate);
+    }
+    sets.into_values().collect()
+}
+
+/// A track's tracklet indices, ascending.
+fn sorted_members(track: &Track) -> Vec<usize> {
+    let mut members = track.members.clone();
+    members.sort_unstable();
+    members.dedup();
+    members
+}
+
+/// The nights `members` draw on, by integer JD, ascending.
+fn nights_of(members: &[usize], tracklets: &[Tracklet]) -> Vec<i64> {
+    let mut nights: Vec<i64> = members.iter().map(|&m| tracklets[m].night()).collect();
+    nights.sort_unstable();
+    nights.dedup();
+    nights
+}
+
+/// Whether ascending `small` is contained in ascending `big`.
+fn is_subset(small: &[usize], big: &[usize]) -> bool {
+    let mut rest = big.iter();
+    small.iter().all(|x| rest.by_ref().any(|y| y == x))
+}
+
+/// Sets of tracklet indices, looked up by any member.
+struct SetIndex {
+    sets: Vec<Vec<usize>>,
+    by_member: HashMap<usize, Vec<usize>>,
+}
+
+impl SetIndex {
+    /// `sets` must each be ascending.
+    fn new(sets: Vec<Vec<usize>>) -> Self {
+        let mut by_member: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, set) in sets.iter().enumerate() {
+            for &m in set {
+                by_member.entry(m).or_default().push(i);
             }
-            // Too few positions to refine six parameters, so take the state as it
-            // stands rather than discarding a candidate for being short.
-            None => rms_arcsec(&track.state, cfg.reference_jd, &observations, &cfg.site),
-        };
+        }
+        SetIndex { sets, by_member }
+    }
+
+    /// Indices of the sets other than `skip` that contain all of `key`.
+    fn containing<'a>(
+        &'a self,
+        key: &'a [usize],
+        skip: Option<usize>,
+    ) -> impl Iterator<Item = usize> + 'a {
+        // The member shared by the fewest sets bounds the search.
+        let rarest = key
+            .iter()
+            .filter_map(|m| self.by_member.get(m))
+            .min_by_key(|sets| sets.len());
+        let complete = key.iter().all(|m| self.by_member.contains_key(m));
+        rarest
+            .filter(|_| complete)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(move |&i| Some(i) != skip && is_subset(key, &self.sets[i]))
+    }
+
+    /// Whether some set contains all of `key`.
+    fn covers(&self, key: &[usize]) -> bool {
+        self.containing(key, None).next().is_some()
+    }
+}
+
+/// For each set, whether another, larger set contains it.
+fn contained_sets(keys: &[Vec<usize>]) -> Vec<bool> {
+    let index = SetIndex::new(keys.to_vec());
+    keys.par_iter()
+        .enumerate()
+        .map(|(i, key)| {
+            index
+                .containing(key, Some(i))
+                .any(|j| keys[j].len() > key.len())
+        })
+        .collect()
+}
+
+/// How far apart two disjoint fragments' orbits may place them at the
+/// reference epoch and still be compared, degrees. A fragment's orbit is fitted
+/// to a few nights, so it can mispredict the rest of the window by this much.
+const MERGE_RADIUS_DEG: f64 = 2.0;
+/// How different two disjoint fragments' on-sky rates at the reference epoch
+/// may be, degrees/day.
+const MERGE_RATE_DEG_PER_DAY: f64 = 0.1;
+/// How far one fragment's orbit may miss the other's first tracklet for the
+/// pair to be worth a joint fit, arcseconds. Two predictions are far cheaper
+/// than a fit, and unrelated objects miss by degrees.
+const MERGE_PREDICT_ARCSEC: f64 = 600.0;
+
+/// Where a track's orbit places it at the reference epoch, and how fast it moves
+/// there: RA, Dec, and the rates along each, degrees and degrees/day, the RA
+/// rate on a great circle.
+fn sky_motion(track: &Track, cfg: &LinkConfig) -> Option<[f64; 4]> {
+    let at = |jd: f64| predict_radec(&track.state, cfg.reference_jd, jd, &cfg.site);
+    let (ra, dec) = at(cfg.reference_jd)?;
+    let (ra_a, dec_a) = at(cfg.reference_jd - 0.5)?;
+    let (ra_b, dec_b) = at(cfg.reference_jd + 0.5)?;
+    let dra = ((ra_b - ra_a + 540.0).rem_euclid(360.0) - 180.0) * dec.to_radians().cos();
+    Some([ra, dec, dra, dec_b - dec_a])
+}
+
+/// The RA bin of `ra` in dec band `band`, and the band's bin count. Bands are
+/// `size` degrees in dec.
+///
+/// A bin spans at least the RA that `size` on the sky can cover anywhere a
+/// point in the band, or a neighbor within `size` of one, can be. Bins are
+/// therefore sized for the dec farthest from the equator, `size` beyond the
+/// band's poleward edge, and anything within `size` of a point lies in an
+/// adjacent bin of its own or a neighboring band.
+fn sky_cell(ra: f64, band: i64, size: f64) -> (i64, i64) {
+    let poleward = (band as f64 * size)
+        .abs()
+        .max(((band + 1) as f64 * size).abs());
+    let farthest = (poleward + size).min(90.0).to_radians();
+    // Exact rather than the small-angle `size / cos(dec)`, which falls short
+    // near the poles: haversine bounds the RA difference by this.
+    let half = (size / 2.0).to_radians().sin() / farthest.cos();
+    let width = if half >= 1.0 {
+        360.0
+    } else {
+        2.0 * half.asin().to_degrees()
+    };
+    let bins = ((360.0 / width).floor() as i64).max(1);
+    (
+        (ra.rem_euclid(360.0) / 360.0 * bins as f64).floor() as i64 % bins,
+        bins,
+    )
+}
+
+/// Whether `a`'s orbit passes near `b`'s earliest tracklet.
+fn predicts(a: &Track, b_members: &[usize], tracklets: &[Tracklet], cfg: &LinkConfig) -> bool {
+    let Some(t) = b_members
+        .iter()
+        .map(|&m| &tracklets[m])
+        .min_by(|x, y| x.jd_ref.total_cmp(&y.jd_ref))
+    else {
+        return false;
+    };
+    predict_radec(&a.state, cfg.reference_jd, t.jd_ref, &cfg.site).is_some_and(|(ra, dec)| {
+        angular_separation_deg(ra, dec, t.ra_ref, t.dec_ref) * 3600.0 <= MERGE_PREDICT_ARCSEC
+    })
+}
+
+/// Pairs of tracks worth a joint fit: those sharing a tracklet, and disjoint
+/// ones from different nights whose orbits agree on where the object is.
+fn merge_candidates(
+    tracks: &[Track],
+    members: &[Vec<usize>],
+    nights: &[Vec<i64>],
+    tracklets: &[Tracklet],
+    cfg: &LinkConfig,
+) -> Vec<(usize, usize)> {
+    let index = SetIndex::new(members.to_vec());
+    let motion: Vec<Option<[f64; 4]>> = tracks.par_iter().map(|t| sky_motion(t, cfg)).collect();
+    let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (i, m) in motion.iter().enumerate() {
+        if let Some([ra, dec, _, _]) = m {
+            let band = (dec / MERGE_RADIUS_DEG).floor() as i64;
+            grid.entry((band, sky_cell(*ra, band, MERGE_RADIUS_DEG).0))
+                .or_default()
+                .push(i);
+        }
+    }
+    let mut pairs: Vec<(usize, usize)> = (0..tracks.len())
+        .into_par_iter()
+        .flat_map_iter(|i| {
+            let mut found: Vec<(usize, usize)> = Vec::new();
+            // Tracks sharing a tracklet: the same object found twice, overlapping.
+            for &m in &members[i] {
+                if let Some(others) = index.by_member.get(&m) {
+                    found.extend(others.iter().filter(|&&j| j > i).map(|&j| (i, j)));
+                }
+            }
+            // Disjoint pieces: close on the sky, moving alike, on other nights,
+            // and one orbit landing near the other piece.
+            let Some([ra, dec, ra_rate, dec_rate]) = motion[i] else {
+                return found;
+            };
+            let band = (dec / MERGE_RADIUS_DEG).floor() as i64;
+            for b in band - 1..=band + 1 {
+                let (x, bins) = sky_cell(ra, b, MERGE_RADIUS_DEG);
+                for dx in -1..=1 {
+                    let Some(bucket) = grid.get(&(b, (x + dx).rem_euclid(bins))) else {
+                        continue;
+                    };
+                    for &j in bucket {
+                        let Some([ra_j, dec_j, ra_rate_j, dec_rate_j]) = motion[j] else {
+                            continue;
+                        };
+                        if j > i
+                            && angular_separation_deg(ra, dec, ra_j, dec_j) <= MERGE_RADIUS_DEG
+                            && (ra_rate - ra_rate_j).hypot(dec_rate - dec_rate_j)
+                                <= MERGE_RATE_DEG_PER_DAY
+                            && disjoint(&nights[i], &nights[j])
+                            && (predicts(&tracks[i], &members[j], tracklets, cfg)
+                                || predicts(&tracks[j], &members[i], tracklets, cfg))
+                        {
+                            found.push((i, j));
+                        }
+                    }
+                }
+            }
+            found
+        })
+        .collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
+
+/// Join tracks that are pieces of one object: tracks sharing tracklets, and
+/// disjoint pieces whose union one orbit still fits within the residual gate.
+///
+/// A window long enough to link an object over many nights also splits it more
+/// often, since each piece can cluster under a different hypothesis. A track
+/// another one contains is absorbed; any other pair is joined only once its
+/// union is fitted and passes the gate.
+///
+/// Rounds run until one joins nothing. A round joins each track to at most one
+/// other, so a later round joins the pieces an earlier one assembled, and every
+/// round that joins anything leaves fewer tracks, so the rounds end.
+fn merge_fragments(
+    mut tracks: Vec<Track>,
+    tracklets: &[Tracklet],
+    by_id: &HashMap<i64, &Detection>,
+    cfg: &LinkConfig,
+) -> Vec<Track> {
+    // Pairs whose union failed the gate, by their members. A track no round
+    // joins keeps its members, so its pairs would only be fitted again.
+    let mut failed: std::collections::HashSet<(Vec<usize>, Vec<usize>)> =
+        std::collections::HashSet::new();
+    // Indices change between rounds, so a pair is known by its members, in
+    // order so either way round finds it.
+    let pair_key = |a: &Vec<usize>, b: &Vec<usize>| {
+        if a <= b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        }
+    };
+    loop {
+        let members: Vec<Vec<usize>> = tracks.iter().map(sorted_members).collect();
+        let nights: Vec<Vec<i64>> = members.iter().map(|m| nights_of(m, tracklets)).collect();
+        let pairs = merge_candidates(&tracks, &members, &nights, tracklets, cfg);
+
+        let attempts: Vec<(usize, usize, Option<Track>)> = pairs
+            .par_iter()
+            .filter(|&&(i, j)| !failed.contains(&pair_key(&members[i], &members[j])))
+            .map(|&(i, j)| {
+                // A track inside another adds nothing to it.
+                if is_subset(&members[i], &members[j]) {
+                    return (i, j, Some(tracks[j].clone()));
+                }
+                if is_subset(&members[j], &members[i]) {
+                    return (i, j, Some(tracks[i].clone()));
+                }
+                (
+                    i,
+                    j,
+                    try_merge(&tracks[i], &tracks[j], tracklets, by_id, cfg),
+                )
+            })
+            .collect();
+        let mut joined: Vec<(usize, usize, Track)> = Vec::new();
+        for (i, j, track) in attempts {
+            match track {
+                Some(track) => joined.push((i, j, track)),
+                None => {
+                    failed.insert(pair_key(&members[i], &members[j]));
+                }
+            }
+        }
+        if joined.is_empty() {
+            break;
+        }
+        // Best union first; each track joins at most one other per round.
+        joined.sort_by(|a, b| {
+            a.2.residual_arcsec
+                .unwrap_or(f64::INFINITY)
+                .partial_cmp(&b.2.residual_arcsec.unwrap_or(f64::INFINITY))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then((a.0, a.1).cmp(&(b.0, b.1)))
+        });
+        let mut used = vec![false; tracks.len()];
+        let mut merged = Vec::new();
+        for (i, j, track) in joined {
+            if used[i] || used[j] {
+                continue;
+            }
+            used[i] = true;
+            used[j] = true;
+            merged.push(track);
+        }
+        tracks = tracks
+            .into_iter()
+            .zip(used)
+            .filter(|(_, used)| !used)
+            .map(|(track, _)| track)
+            .chain(merged)
+            .collect();
+    }
+    tracks
+}
+
+/// Whether two ascending lists share nothing.
+fn disjoint<T: Ord>(a: &[T], b: &[T]) -> bool {
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => return false,
+        }
+    }
+    true
+}
+
+/// One track from two, if a single orbit fits both within the residual gate,
+/// run to convergence like every other track so it ranks against them on its
+/// orbit's residual.
+///
+/// Seeded from the piece with the longer arc first, since its orbit is the
+/// better constrained.
+fn try_merge(
+    a: &Track,
+    b: &Track,
+    tracklets: &[Tracklet],
+    by_id: &HashMap<i64, &Detection>,
+    cfg: &LinkConfig,
+) -> Option<Track> {
+    let arc = |t: &Track| {
+        let jds = t.members.iter().map(|&m| tracklets[m].jd_ref);
+        let (lo, hi) = jds.fold((f64::MAX, f64::MIN), |(lo, hi), j| (lo.min(j), hi.max(j)));
+        hi - lo
+    };
+    let (first, second) = if arc(a) >= arc(b) { (a, b) } else { (b, a) };
+    let mut members: Vec<usize> = first
+        .members
+        .iter()
+        .chain(&second.members)
+        .copied()
+        .collect();
+    members.sort_unstable();
+    members.dedup();
+    let nights = nights_of(&members, tracklets).len();
+    let union = |seed: &Track| Track {
+        members: members.clone(),
+        hypothesis: seed.hypothesis,
+        state: seed.state,
+        nights,
+        rms_au: seed.rms_au,
+        residual_arcsec: None,
+    };
+    // Both seeds fit the same positions.
+    let observations = observations_of(&union(first), tracklets, by_id, &cfg.site);
+    let gate = gate_arcsec(&observations, cfg);
+    let mut track = [first, second].into_iter().find_map(|seed| {
+        let mut track = union(seed);
+        score(&mut track, &observations, cfg, cfg.conics);
+        track
+            .residual_arcsec
+            .is_some_and(|r| r <= gate)
+            .then_some(track)
+    })?;
+    converge(&mut track, &observations, cfg, cfg.conics);
+    if !is_bound(&track.state) {
+        let seeds = [first, second]
+            .into_iter()
+            .filter(|seed| is_bound(&seed.state))
+            .map(union)
+            .chain([Track {
+                state: bound_seed(&track.state),
+                ..track.clone()
+            }])
+            .collect();
+        let (bound, _) = settle(seeds, Vec::new(), &observations, cfg, Conics::Bound);
+        track = choose_conic(track, bound, &observations, cfg)?;
+    }
+    photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
 }
 
 /// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
@@ -630,23 +1719,45 @@ pub fn link_tracklets(
     cfg: &LinkConfig,
 ) -> Vec<Track> {
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
-    // Collected in hypothesis order, so the result does not depend on thread
-    // scheduling and deduplication stays reproducible.
-    let mut tracks: Vec<Track> = cfg
-        .hypotheses
-        .par_iter()
-        .flat_map(|hypothesis| tracks_for_hypothesis(tracklets, hypothesis, cfg))
+    let sets = candidate_sets(tracklets, cfg);
+    let keys: Vec<Vec<usize>> = sets
+        .iter()
+        .map(|copies| sorted_members(&copies[0]))
         .collect();
+    let mut sets: Vec<Option<Vec<Track>>> = sets.into_iter().map(Some).collect();
 
-    tracks
+    // A set another set contains is only worth fitting when the larger one
+    // fails: a passing track already reports those tracklets, and fitting the
+    // subset too left a second, overlapping track for the same object. Sets
+    // nothing contains are fitted first, then the rest the passing ones do not
+    // already cover. Only sets whose orbit passes the gate come back: an orbit
+    // nothing explains is not a track, whatever its states did.
+    let contained = contained_sets(&keys);
+    let mut tracks: Vec<Track> = sets
         .par_iter_mut()
-        .for_each(|track| score(track, tracklets, &by_id, cfg));
+        .enumerate()
+        .filter_map(|(i, slot)| {
+            if contained[i] {
+                return None;
+            }
+            best_passing(slot.take()?, tracklets, &by_id, cfg)
+        })
+        .collect();
+    let covering = SetIndex::new(tracks.iter().map(sorted_members).collect());
+    let inner: Vec<Track> = sets
+        .par_iter_mut()
+        .enumerate()
+        .filter_map(|(i, slot)| {
+            let copies = slot.take()?;
+            if covering.covers(&keys[i]) {
+                return None;
+            }
+            best_passing(copies, tracklets, &by_id, cfg)
+        })
+        .collect();
+    tracks.extend(inner);
 
-    // An orbit nothing explains is not a track, whatever its states did.
-    tracks.retain(|t| {
-        t.residual_arcsec
-            .is_some_and(|r| r <= cfg.max_residual_arcsec)
-    });
+    let mut tracks = merge_fragments(tracks, tracklets, &by_id, cfg);
 
     // Best-fitting first, then longest, so deduplication keeps the candidate
     // the astrometry supports rather than the one found earliest.
@@ -683,6 +1794,7 @@ pub fn deduplicate(tracks: Vec<Track>) -> Vec<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::sso_geometry::{heliocentric_position, TT_MINUS_UTC_DAYS};
 
     /// Angular separation, degrees.
     fn angular_gap(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
@@ -832,7 +1944,7 @@ mod tests {
                 norm(&state.pos)
             );
             // Seen from Earth it must lie in the direction that was searched.
-            let e = earth_position(jd);
+            let e = earth_position_utc(jd);
             let (sra, sdec) = radec_from_ecliptic(&[
                 state.pos[0] - e[0],
                 state.pos[1] - e[1],
@@ -891,6 +2003,7 @@ mod tests {
             min_nights: 2,
             max_residual_arcsec: 2.0,
             site: ZTF,
+            conics: Conics::Bound,
         };
 
         let started = Instant::now();
@@ -946,8 +2059,8 @@ mod tests {
     fn tracklet_for(elements: &OrbitalElements, jd: f64) -> Tracklet {
         let step = 0.02;
         let at = |t: f64| {
-            let helio = heliocentric_position(elements, t);
-            let earth = earth_position(t);
+            let helio = heliocentric_position(elements, t + TT_MINUS_UTC_DAYS);
+            let earth = earth_position_utc(t);
             let topo = [
                 helio[0] - earth[0],
                 helio[1] - earth[1],
@@ -976,6 +2089,65 @@ mod tests {
             (dec_b - dec_a) / step,
             0.0,
         )
+    }
+
+    /// Every trial orbit THOR searches with can be propagated.
+    ///
+    /// They are circular by construction, and those that came out at exactly
+    /// e = 0 used to propagate to NaN everywhere: a NaN sky track projects no
+    /// detection, so the patch was searched at that distance for nothing.
+    #[test]
+    fn test_every_trial_orbit_propagates() {
+        let jd = 2460000.5;
+        let distances = [1.8, 2.2, 2.6, 3.0, 3.4];
+        let mut checked = 0;
+        for ra_step in 0..52 {
+            for dec in [-30.0, -10.0, 0.0, 10.0, 30.0] {
+                let ra = 7.0 * f64::from(ra_step);
+                for (state, r_au) in test_orbits(ra, dec, jd, &distances) {
+                    checked += 1;
+                    let here = propagate_position(&state, jd, jd).unwrap_or_else(|| {
+                        panic!("{r_au} au toward {ra},{dec} does not propagate")
+                    });
+                    let off = ((here[0] - state.pos[0]).powi(2)
+                        + (here[1] - state.pos[1]).powi(2)
+                        + (here[2] - state.pos[2]).powi(2))
+                    .sqrt();
+                    assert!(off < 1e-9, "{r_au} au toward {ra},{dec} moves {off} au");
+                    let (ras, decs) = sky_track(&state, jd, &[jd - 3.0, jd, jd + 3.0])
+                        .unwrap_or_else(|| panic!("{r_au} au toward {ra},{dec} has no track"));
+                    assert!(ras.iter().chain(&decs).all(|c| c.is_finite()));
+                }
+            }
+        }
+        assert!(checked > 1000, "only {checked} trial orbits");
+    }
+
+    /// Circular orbits, which have no perihelion to measure angles from, move
+    /// a quarter of the way round in a quarter period, whichever way they go.
+    #[test]
+    fn test_circular_orbits_propagate() {
+        let r: f64 = 2.5;
+        let speed = (MU / r).sqrt();
+        let quarter = std::f64::consts::FRAC_PI_2 * r / speed;
+        let jd = 2460000.5;
+        let cases = [
+            // Equatorial, prograde: +x then +y.
+            ([r, 0.0, 0.0], [0.0, speed, 0.0], [0.0, r, 0.0]),
+            // Equatorial, retrograde: +x then -y.
+            ([r, 0.0, 0.0], [0.0, -speed, 0.0], [0.0, -r, 0.0]),
+            // Inclined 90 degrees: +y then +z.
+            ([0.0, r, 0.0], [0.0, 0.0, speed], [0.0, 0.0, r]),
+        ];
+        for (pos, vel, expected) in cases {
+            let moved = propagate_position(&State { pos, vel }, jd, jd + quarter)
+                .unwrap_or_else(|| panic!("{vel:?} does not propagate"));
+            let off = ((moved[0] - expected[0]).powi(2)
+                + (moved[1] - expected[1]).powi(2)
+                + (moved[2] - expected[2]).powi(2))
+            .sqrt();
+            assert!(off < 1e-6, "{vel:?} lands at {moved:?}, not {expected:?}");
+        }
     }
 
     #[test]
@@ -1062,11 +2234,419 @@ mod tests {
             min_nights: 2,
             max_residual_arcsec: 2.0,
             site: ZTF,
+            conics: Conics::Bound,
         };
         let tracks = link_tracklets(&tracklets, &[], &cfg);
         assert!(!tracks.is_empty(), "no track recovered");
         assert_eq!(tracks[0].members.len(), 3);
         assert_eq!(tracks[0].nights, 3);
+    }
+
+    /// Objects in [`small_survey`].
+    const SURVEY_OBJECTS: usize = 12;
+
+    /// The `k`th main-belt object of the synthetic surveys below.
+    fn survey_object(k: usize) -> OrbitalElements {
+        OrbitalElements::elliptical(
+            2460012.0,
+            2.2 + 0.08 * k as f64,
+            0.05 + 0.01 * (k % 5) as f64,
+            3.0 + 1.5 * (k % 7) as f64,
+            (30.0 * k as f64) % 360.0,
+            (47.0 * k as f64) % 360.0,
+            (97.0 * k as f64) % 360.0,
+        )
+    }
+
+    /// Detections of `objects`, each seen twice a night on `nights` from the
+    /// site the fit models, and the object each detection belongs to.
+    fn survey(
+        objects: &[OrbitalElements],
+        nights: &[f64],
+    ) -> (Vec<Detection>, HashMap<i64, usize>) {
+        use crate::utils::identify::predict_radec_from;
+        let mut detections = Vec::new();
+        let mut owner = HashMap::new();
+        for (k, el) in objects.iter().enumerate() {
+            for (n, &start) in nights.iter().enumerate() {
+                for visit in 0..2 {
+                    let jd = start + 0.06 * visit as f64 + 0.001 * k as f64;
+                    let (ra, dec) = predict_radec_from(el, jd, &ZTF);
+                    let id = (k * 100 + n * 10 + visit) as i64;
+                    owner.insert(id, k);
+                    detections.push(Detection {
+                        id,
+                        jd,
+                        ra,
+                        dec,
+                        mag: Some(19.0),
+                        mag_err: Some(0.1),
+                        band: Some('r'),
+                        site: None,
+                    });
+                }
+            }
+        }
+        (detections, owner)
+    }
+
+    /// Tracklets per night, as the finder builds them.
+    #[test]
+    fn test_a_night_far_brighter_than_the_others_is_another_object() {
+        let el = OrbitalElements::elliptical(2460012.0, 2.5, 0.1, 5.0, 40.0, 60.0, 30.0);
+        let nights = [2460009.70, 2460012.72, 2460016.68];
+        let (mut detections, _) = survey(&[el], &nights);
+        let epoch = nights[1];
+        let at = |jd: f64| heliocentric_position(&el, jd);
+        let (a, b) = (at(epoch - 0.05), at(epoch + 0.05));
+        let state = State {
+            pos: at(epoch),
+            vel: [
+                (b[0] - a[0]) / 0.1,
+                (b[1] - a[1]) / 0.1,
+                (b[2] - a[2]) / 0.1,
+            ],
+        };
+        let spread = |dets: &[Detection]| {
+            night_magnitude_spread(&state, epoch, &dets.iter().collect::<Vec<_>>())
+                .expect("three nights with magnitudes")
+        };
+        assert!(spread(&detections) < 0.5);
+        for d in detections.iter_mut().filter(|d| d.jd >= nights[2]) {
+            d.mag = Some(15.5);
+        }
+        assert!(spread(&detections) > MAX_NIGHT_MAG_SPREAD);
+    }
+
+    fn survey_tracklets(detections: &[Detection], nights: &[f64]) -> Vec<Tracklet> {
+        use crate::utils::linking::{find_tracklets, TrackletConfig};
+        let mut tracklets = Vec::new();
+        for &start in nights {
+            let night: Vec<Detection> = detections
+                .iter()
+                .filter(|d| (d.jd - start).abs() < 0.5)
+                .copied()
+                .collect();
+            tracklets.extend(find_tracklets(&night, &TrackletConfig::default()));
+        }
+        tracklets
+    }
+
+    /// The default search, referenced to the middle of `tracklets`.
+    fn survey_config(tracklets: &[Tracklet]) -> LinkConfig {
+        let jds: Vec<f64> = tracklets.iter().map(|t| t.jd_ref).collect();
+        LinkConfig {
+            reference_jd: (jds.iter().cloned().fold(f64::MAX, f64::min)
+                + jds.iter().cloned().fold(f64::MIN, f64::max))
+                / 2.0,
+            ..LinkConfig::default()
+        }
+    }
+
+    /// The objects a track draws its detections from.
+    fn owners_of(
+        track: &Track,
+        tracklets: &[Tracklet],
+        owner: &HashMap<i64, usize>,
+    ) -> std::collections::HashSet<usize> {
+        track
+            .members
+            .iter()
+            .flat_map(|&m| tracklets[m].ids.iter())
+            .map(|id| owner[id])
+            .collect()
+    }
+
+    const SURVEY_NIGHTS: [f64; 3] = [2460010.70, 2460012.72, 2460015.68];
+
+    /// A small survey seen from the site the fit models: [`SURVEY_OBJECTS`]
+    /// main-belt objects, each visited twice a night on three nights. Returns
+    /// the detections, the tracklets found in them, which object each
+    /// detection belongs to, and a config referenced to the middle of the arc.
+    fn small_survey() -> (
+        Vec<Detection>,
+        Vec<Tracklet>,
+        HashMap<i64, usize>,
+        LinkConfig,
+    ) {
+        let objects: Vec<OrbitalElements> = (0..SURVEY_OBJECTS).map(survey_object).collect();
+        let (detections, owner) = survey(&objects, &SURVEY_NIGHTS);
+        let tracklets = survey_tracklets(&detections, &SURVEY_NIGHTS);
+        let cfg = survey_config(&tracklets);
+        (detections, tracklets, owner, cfg)
+    }
+
+    /// Every object of [`small_survey`] that forms tracklets on two nights
+    /// must come back, and no track may mix objects. This is the property the
+    /// per-set early exit in `link_tracklets` must not trade away for speed.
+    #[test]
+    fn test_links_every_linkable_object_of_a_small_survey() {
+        use std::collections::HashSet;
+
+        let (detections, tracklets, owner, cfg) = small_survey();
+        // What linking can reach: objects with a tracklet on two nights.
+        let mut nights_of: HashMap<usize, HashSet<i64>> = HashMap::new();
+        for t in &tracklets {
+            for id in &t.ids {
+                nights_of.entry(owner[id]).or_default().insert(t.night());
+            }
+        }
+        let linkable: HashSet<usize> = nights_of
+            .iter()
+            .filter(|(_, n)| n.len() >= 2)
+            .map(|(&k, _)| k)
+            .collect();
+        assert!(
+            linkable.len() >= 8,
+            "only {} objects formed tracklets on two nights",
+            linkable.len()
+        );
+
+        let tracks = link_tracklets(&tracklets, &detections, &cfg);
+
+        let mut recovered = HashSet::new();
+        for track in &tracks {
+            let objects = owners_of(track, &tracklets, &owner);
+            assert_eq!(objects.len(), 1, "a track mixes objects {objects:?}");
+            recovered.extend(objects);
+        }
+        let missed: Vec<&usize> = linkable.difference(&recovered).collect();
+        assert!(missed.is_empty(), "linkable objects not linked: {missed:?}");
+    }
+
+    #[test]
+    fn test_links_objects_whose_distance_changes_over_the_arc() {
+        use std::collections::HashSet;
+
+        let objects: Vec<OrbitalElements> = (0..36)
+            .map(|k| {
+                OrbitalElements::elliptical(
+                    2460012.0,
+                    [1.3, 1.7, 2.1][k / 12],
+                    [0.4, 0.5, 0.6][(k / 4) % 3],
+                    4.0 + 2.0 * (k % 5) as f64,
+                    (37.0 * k as f64) % 360.0,
+                    (53.0 * k as f64) % 360.0,
+                    45.0 + 90.0 * (k % 4) as f64,
+                )
+            })
+            .collect();
+        let nights = [2460009.70, 2460012.72, 2460016.68];
+        let (detections, owner) = survey(&objects, &nights);
+        let tracklets = survey_tracklets(&detections, &nights);
+        let cfg = survey_config(&tracklets);
+        let mut nights_of: HashMap<usize, HashSet<i64>> = HashMap::new();
+        for t in &tracklets {
+            for id in &t.ids {
+                nights_of.entry(owner[id]).or_default().insert(t.night());
+            }
+        }
+        let linkable: HashSet<usize> = nights_of
+            .iter()
+            .filter(|(_, n)| n.len() >= 2)
+            .map(|(&k, _)| k)
+            .collect();
+
+        let mut recovered = HashSet::new();
+        for track in link_tracklets(&tracklets, &detections, &cfg) {
+            let objects = owners_of(&track, &tracklets, &owner);
+            assert_eq!(objects.len(), 1, "a track mixes objects {objects:?}");
+            recovered.extend(objects);
+        }
+        let missed: Vec<&usize> = linkable.difference(&recovered).collect();
+        assert!(missed.is_empty(), "linkable objects not linked: {missed:?}");
+    }
+
+    /// Each object comes back once: a subset of a passing track is not fitted
+    /// on its own, and overlapping versions of one object are joined.
+    #[test]
+    fn test_each_object_is_reported_as_one_track() {
+        let (detections, tracklets, owner, cfg) = small_survey();
+        let tracks = link_tracklets(&tracklets, &detections, &cfg);
+        let mut per_object: HashMap<usize, usize> = HashMap::new();
+        for track in &tracks {
+            for k in owners_of(track, &tracklets, &owner) {
+                *per_object.entry(k).or_default() += 1;
+            }
+        }
+        let repeated: Vec<(&usize, &usize)> = per_object.iter().filter(|(_, &n)| n > 1).collect();
+        assert!(
+            repeated.is_empty(),
+            "objects reported more than once: {repeated:?}"
+        );
+    }
+
+    /// A fitted track for `members` of `tracklets`, seeded from the true state.
+    fn fitted_piece(
+        el: &OrbitalElements,
+        members: Vec<usize>,
+        tracklets: &[Tracklet],
+        by_id: &HashMap<i64, &Detection>,
+        cfg: &LinkConfig,
+    ) -> Track {
+        let at = |jd: f64| heliocentric_position(el, jd);
+        let pos = at(cfg.reference_jd);
+        let (a, b) = (at(cfg.reference_jd - 0.05), at(cfg.reference_jd + 0.05));
+        let vel = [
+            (b[0] - a[0]) / 0.1,
+            (b[1] - a[1]) / 0.1,
+            (b[2] - a[2]) / 0.1,
+        ];
+        let nights = nights_of(&members, tracklets).len();
+        let mut track = Track {
+            members,
+            hypothesis: Hypothesis {
+                r_au: norm(&pos),
+                rdot_au_per_day: 0.0,
+            },
+            state: State { pos, vel },
+            nights,
+            rms_au: 0.0,
+            residual_arcsec: None,
+        };
+        let observations = observations_of(&track, tracklets, by_id, &cfg.site);
+        score(&mut track, &observations, cfg, cfg.conics);
+        track
+    }
+
+    const FOUR_NIGHTS: [f64; 4] = [2460010.70, 2460012.72, 2460015.68, 2460017.71];
+
+    /// Two pieces of one object on different nights are joined into one track
+    /// once a single orbit fits both.
+    #[test]
+    fn test_disjoint_pieces_of_one_object_are_joined() {
+        let el = survey_object(3);
+        let (detections, _) = survey(std::slice::from_ref(&el), &FOUR_NIGHTS);
+        let tracklets = survey_tracklets(&detections, &FOUR_NIGHTS);
+        assert_eq!(tracklets.len(), 4, "one tracklet a night");
+        let cfg = survey_config(&tracklets);
+        let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+
+        let early = fitted_piece(&el, vec![0, 1], &tracklets, &by_id, &cfg);
+        let late = fitted_piece(&el, vec![2, 3], &tracklets, &by_id, &cfg);
+        for piece in [&early, &late] {
+            assert!(
+                piece
+                    .residual_arcsec
+                    .is_some_and(|r| r <= cfg.max_residual_arcsec),
+                "piece does not fit on its own: {:?}",
+                piece.residual_arcsec
+            );
+        }
+
+        let merged = merge_fragments(vec![early, late], &tracklets, &by_id, &cfg);
+        assert_eq!(merged.len(), 1, "pieces were not joined");
+        let mut members = merged[0].members.clone();
+        members.sort_unstable();
+        assert_eq!(members, vec![0, 1, 2, 3]);
+        assert_eq!(merged[0].nights, 4);
+    }
+
+    /// Every point within the merge radius of another lies in an adjacent cell,
+    /// including near a band's poleward edge, where the RA a radius covers is
+    /// widest.
+    #[test]
+    fn test_neighbors_on_the_sky_share_adjacent_cells() {
+        let size = MERGE_RADIUS_DEG;
+        let reach = size * 0.999;
+        let mut dec = -89.95;
+        while dec < 90.0 {
+            for ra in [0.0, 0.7, 123.4, 359.9] {
+                let band = (dec / size).floor() as i64;
+                for bearing in 0..72 {
+                    let theta = (bearing as f64 * 5.0).to_radians();
+                    // A point `reach` away along `theta`.
+                    let (d0, r) = (dec.to_radians(), reach.to_radians());
+                    let d1 = (d0.sin() * r.cos() + d0.cos() * r.sin() * theta.cos()).asin();
+                    let dra = (theta.sin() * r.sin() * d0.cos())
+                        .atan2(r.cos() - d0.sin() * d1.sin())
+                        .to_degrees();
+                    let (ra_j, dec_j) = ((ra + dra).rem_euclid(360.0), d1.to_degrees());
+                    assert!(angular_separation_deg(ra, dec, ra_j, dec_j) <= size);
+                    let band_j = (dec_j / size).floor() as i64;
+                    assert!((band_j - band).abs() <= 1, "dec {dec} -> {dec_j}");
+                    let (x_j, bins) = sky_cell(ra_j, band_j, size);
+                    let (x, _) = sky_cell(ra, band_j, size);
+                    let gap = (x_j - x).rem_euclid(bins).min((x - x_j).rem_euclid(bins));
+                    assert!(
+                        gap <= 1,
+                        "({ra}, {dec}) and ({ra_j}, {dec_j}) are {gap} bins apart"
+                    );
+                }
+            }
+            dec += 0.05;
+        }
+    }
+
+    /// An object split into more overlapping pieces than a few rounds of
+    /// pairwise joins can assemble still comes back as one track.
+    #[test]
+    fn test_a_long_chain_of_pieces_becomes_one_track() {
+        let el = survey_object(3);
+        let nights: Vec<f64> = (0..10).map(|k| 2460010.70 + 2.0 * k as f64).collect();
+        let (detections, _) = survey(std::slice::from_ref(&el), &nights);
+        let tracklets = survey_tracklets(&detections, &nights);
+        assert_eq!(tracklets.len(), nights.len(), "one tracklet a night");
+        let cfg = survey_config(&tracklets);
+        let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+
+        // Nine pieces, each sharing a night with the next: three rounds of
+        // pairwise joins assemble at most eight.
+        let pieces: Vec<Track> = (0..nights.len() - 1)
+            .map(|k| fitted_piece(&el, vec![k, k + 1], &tracklets, &by_id, &cfg))
+            .collect();
+        let merged = merge_fragments(pieces, &tracklets, &by_id, &cfg);
+        assert_eq!(merged.len(), 1, "pieces left apart: {}", merged.len());
+        assert_eq!(
+            sorted_members(&merged[0]),
+            (0..nights.len()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Pieces of two different objects stay apart even when both fit alone.
+    #[test]
+    fn test_pieces_of_different_objects_are_not_joined() {
+        let near = survey_object(3);
+        let twin = OrbitalElements::elliptical(
+            near.epoch_jd,
+            near.a,
+            near.e,
+            near.incl,
+            near.node,
+            near.peri,
+            near.mean_anomaly + 0.02,
+        );
+        let objects = [near, twin];
+        let first_night = crate::utils::linking::night_of(FOUR_NIGHTS[0]);
+        let (all, owner) = survey(&objects, &FOUR_NIGHTS);
+        let detections: Vec<Detection> = all
+            .into_iter()
+            .filter(|d| {
+                let early = d.night() - first_night < 3;
+                early == (owner[&d.id] == 0)
+            })
+            .collect();
+        let tracklets = survey_tracklets(&detections, &FOUR_NIGHTS);
+        let cfg = survey_config(&tracklets);
+        let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+        let piece_of = |k: usize| -> Vec<usize> {
+            (0..tracklets.len())
+                .filter(|&m| owner[&tracklets[m].ids[0]] == k)
+                .collect()
+        };
+        let pieces = vec![
+            fitted_piece(&objects[0], piece_of(0), &tracklets, &by_id, &cfg),
+            fitted_piece(&objects[1], piece_of(1), &tracklets, &by_id, &cfg),
+        ];
+        let members: Vec<Vec<usize>> = pieces.iter().map(sorted_members).collect();
+        let nights: Vec<Vec<i64>> = members.iter().map(|m| nights_of(m, &tracklets)).collect();
+        assert_eq!(
+            merge_candidates(&pieces, &members, &nights, &tracklets, &cfg),
+            vec![(0, 1)],
+            "the neighbors should reach the joint fit"
+        );
+        let merged = merge_fragments(pieces, &tracklets, &by_id, &cfg);
+        assert_eq!(merged.len(), 2, "different objects were joined");
     }
 
     #[test]
@@ -1109,10 +2689,455 @@ mod tests {
             min_nights: 2,
             max_residual_arcsec: 2.0,
             site: ZTF,
+            conics: Conics::Bound,
         };
         let tracks = link_tracklets(&tracklets, &[], &cfg);
         assert_eq!(tracks.len(), 1, "one object should yield one track");
         assert_eq!(tracks[0].members.len(), 3);
+    }
+
+    /// Where the give-up line sits against the fits it must spare.
+    ///
+    /// Every copy in [`small_survey`] whose fit passes the gate within the
+    /// screening budget is run to [`GiveUp::for_gate`]'s check and must be
+    /// comfortably below its line by then. The worst such fit sits near 22
+    /// arcsec at the default 2 arcsec gate, against a line at 36; the margin
+    /// asserted here is what stops the line being tightened until it abandons
+    /// fits that would have passed.
+    #[test]
+    fn test_give_up_spares_every_fit_that_would_pass() {
+        use crate::utils::orbit_fit::fit_orbit;
+
+        let (detections, tracklets, _, cfg) = small_survey();
+        let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+        let give_up = GiveUp::for_gate(cfg.max_residual_arcsec);
+        let line = give_up.above_arcsec;
+        let mut passing = 0;
+        let mut worst: f64 = 0.0;
+        for copies in candidate_sets(&tracklets, &cfg) {
+            let observations = observations_of(&copies[0], &tracklets, &by_id, &cfg.site);
+            for copy in &copies {
+                let fit = |iterations| {
+                    fit_orbit(&observations, &copy.state, cfg.reference_jd, iterations)
+                };
+                let Some(full) = fit(SCREEN_ITERATIONS) else {
+                    continue;
+                };
+                if full.rms_arcsec > cfg.max_residual_arcsec {
+                    continue;
+                }
+                passing += 1;
+                worst = worst.max(fit(give_up.after_iterations).unwrap().rms_arcsec);
+            }
+        }
+        assert!(passing > 1000, "only {passing} passing fits to check");
+        assert!(
+            worst * 1.5 <= line,
+            "a passing fit was at {worst:.1} arcsec after {} iterations, too \
+             close to the give-up line at {line:.1}",
+            give_up.after_iterations
+        );
+    }
+
+    /// A set's reported residual is as good as fitting every copy of it would
+    /// give, which is what linking did before it stopped fitting them all.
+    ///
+    /// Taking the first copy to pass, tightest cluster first, reported up to
+    /// 1.8 arcsec where another copy of the same set fitted to 0.02: the
+    /// tightest cluster is often at the wrong distance, and a short arc's fit
+    /// keeps its seed's distance. That residual is persisted and ranks sets
+    /// against each other, so it has to be the best the set supports.
+    #[test]
+    fn test_reported_residual_matches_fitting_every_copy() {
+        use crate::utils::orbit_fit::fit_orbit;
+
+        let (detections, tracklets, _, cfg) = small_survey();
+        let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+        let mut checked = 0;
+        for copies in candidate_sets(&tracklets, &cfg) {
+            let observations = observations_of(&copies[0], &tracklets, &by_id, &cfg.site);
+            let every_copy = copies
+                .iter()
+                .filter_map(|copy| {
+                    fit_orbit(
+                        &observations,
+                        &copy.state,
+                        cfg.reference_jd,
+                        SCREEN_ITERATIONS,
+                    )
+                })
+                .map(|fit| fit.rms_arcsec)
+                .filter(|&r| r <= cfg.max_residual_arcsec)
+                .fold(f64::INFINITY, f64::min);
+            let Some(track) = best_passing(copies, &tracklets, &by_id, &cfg) else {
+                assert!(every_copy.is_infinite(), "a set some copy passes was lost");
+                continue;
+            };
+            checked += 1;
+            let reported = track.residual_arcsec.expect("fitted");
+            assert!(
+                reported <= every_copy + 0.1,
+                "track {:?} reports {reported:.3} arcsec where fitting every copy \
+                 gives {every_copy:.3}",
+                track.members
+            );
+        }
+        assert!(checked >= 8, "only {checked} sets passed");
+    }
+
+    /// THOR's fit gate, seeded as `find_tracklets` seeds it, with the give-up
+    /// line at its looser poor-fit gate.
+    ///
+    /// THOR fits each cluster from the test orbit it formed around, a circular
+    /// orbit at one of a few distances through the patch center, and keeps an
+    /// object's best-fitting cluster. A seed at the wrong distance can still be
+    /// hundreds of arcseconds out at the give-up check and pass by the end, so
+    /// the line abandons some such fits; what must not change is the verdict on
+    /// any object, which here holds with the line at half its height. Running
+    /// passing fits on to convergence can only improve a verdict.
+    #[test]
+    fn test_thor_give_up_keeps_every_object_verdict() {
+        use crate::utils::identify::predict_radec_from;
+        use crate::utils::orbit_fit::{fit_orbit, fit_orbit_with, fit_within};
+
+        // `find_tracklets` defaults: --max-residual, --max-poor-residual,
+        // --thor-distances.
+        let (good, poor) = (2.0, 10.0);
+        let distances = [1.8, 2.2, 2.6, 3.0, 3.4];
+        let verdict = |rms: f64| match rms {
+            r if r <= good => 0,
+            r if r <= poor => 1,
+            _ => 2,
+        };
+        let half_line = GiveUp {
+            above_arcsec: GiveUp::for_gate(poor).above_arcsec / 2.0,
+            ..GiveUp::for_gate(poor)
+        };
+
+        let (detections, _, owner, cfg) = small_survey();
+        let epoch = cfg.reference_jd;
+        let mut judged = 0;
+        for k in 0..SURVEY_OBJECTS {
+            let observations: Vec<Observation> = detections
+                .iter()
+                .filter(|d| owner[&d.id] == k)
+                .map(|d| Observation {
+                    jd: d.jd,
+                    ra: d.ra,
+                    dec: d.dec,
+                    site: ZTF,
+                })
+                .collect();
+            let (ra, dec) = predict_radec_from(&survey_object(k), epoch, &ZTF);
+            // The patch center is near the object, not on it.
+            for offset in [0.0, 0.5, 1.0] {
+                let seeds = test_orbits(ra + offset, dec + offset, epoch, &distances);
+                let best = |fit: &dyn Fn(&State) -> Option<f64>| {
+                    seeds
+                        .iter()
+                        .filter_map(|(seed, _)| fit(seed))
+                        .map(verdict)
+                        .min()
+                        .unwrap_or(2)
+                };
+                let plain = best(&|seed| {
+                    fit_orbit(&observations, seed, epoch, SCREEN_ITERATIONS).map(|f| f.rms_arcsec)
+                });
+                let tight = best(&|seed| {
+                    fit_orbit_with(
+                        &observations,
+                        seed,
+                        epoch,
+                        SCREEN_ITERATIONS,
+                        Some(half_line),
+                        Conics::Bound,
+                    )
+                    .map(|f| f.rms_arcsec)
+                });
+                let gated = best(&|seed| {
+                    fit_within(&observations, seed, epoch, poor, Conics::Bound)
+                        .map(|f| f.rms_arcsec)
+                });
+                assert_eq!(
+                    tight, plain,
+                    "object {k} at offset {offset}: half the give-up line changes its verdict"
+                );
+                assert!(
+                    gated <= plain,
+                    "object {k} at offset {offset}: fit_within does worse than a plain fit"
+                );
+                judged += usize::from(plain < 2);
+            }
+        }
+        assert!(judged >= 30, "only {judged} object fits passed a gate");
+    }
+
+    /// 2I/Borisov's orbit, JPL's elements: q 2.007 au, e 3.357, v_inf 32 km/s.
+    fn borisov() -> OrbitalElements {
+        let (q, e) = (2.006_548, 3.356_633);
+        OrbitalElements {
+            epoch_jd: 2458826.0536,
+            a: q / (1.0 - e),
+            e,
+            incl: 44.0526,
+            node: 308.1489,
+            peri: 209.1243,
+            mean_anomaly: 0.0,
+            q,
+            tp: 2458826.0536,
+        }
+    }
+
+    /// Tracklets a week either side of the reference epoch propagate back to the hypothesis state.
+    #[test]
+    fn test_a_hypothesis_holds_at_the_reference_epoch() {
+        for (el, mid) in [
+            (
+                OrbitalElements::elliptical(2460012.0, 2.5, 0.1, 5.0, 40.0, 60.0, 30.0),
+                2460012.0,
+            ),
+            (
+                OrbitalElements::elliptical(2460012.0, 1.3, 0.4, 8.0, 40.0, 60.0, 45.0),
+                2460012.0,
+            ),
+            (borisov(), 2458753.5),
+        ] {
+            let at = |jd: f64| heliocentric_position(&el, jd + TT_MINUS_UTC_DAYS);
+            let (pos, a, b) = (at(mid), at(mid - 0.01), at(mid + 0.01));
+            let vel = [
+                (b[0] - a[0]) / 0.02,
+                (b[1] - a[1]) / 0.02,
+                (b[2] - a[2]) / 0.02,
+            ];
+            let h = Hypothesis {
+                r_au: norm(&pos),
+                rdot_au_per_day: dot(&pos, &vel) / norm(&pos),
+            };
+            for dt in [-7.0, -3.0, 3.0, 7.0] {
+                let sight = Sight::of(&tracklet_for(&el, mid + dt));
+                let back = sight
+                    .state_under(&h, dt)
+                    .and_then(|s| propagate(&s, mid + dt, mid))
+                    .expect("a state");
+                let off = norm(&[
+                    back.pos[0] - pos[0],
+                    back.pos[1] - pos[1],
+                    back.pos[2] - pos[2],
+                ]);
+                assert!(off < 1e-4, "e = {} at {dt} days: {off:.1e} au off", el.e);
+            }
+        }
+    }
+
+    /// A Borisov-like object is linked whole only once unbound orbits are searched.
+    #[test]
+    fn test_an_interstellar_object_is_linked_on_a_hyperbola() {
+        let nights = [2458746.70, 2458749.72, 2458753.68, 2458756.71, 2458760.69];
+        let belt = OrbitalElements::elliptical(2458753.5, 2.6, 0.12, 8.0, 150.0, 70.0, 40.0);
+        let (mut detections, mut owner) = survey(&[borisov(), belt], &nights);
+        let mut seed: u64 = 7;
+        let mut uniform = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // Movers seen on one night only, around where the interstellar object is.
+        let around: Vec<(f64, f64)> = detections
+            .iter()
+            .filter(|d| owner[&d.id] == 0)
+            .map(|d| (d.ra, d.dec))
+            .collect();
+        for (n, &start) in nights.iter().enumerate() {
+            let (ra0, dec0) = around[2 * n];
+            for k in 0..20 {
+                let (ra, dec) = (
+                    ra0 + 4.0 * (uniform() - 0.5),
+                    dec0 + 4.0 * (uniform() - 0.5),
+                );
+                let (rate, angle) = (0.05 + 0.75 * uniform(), std::f64::consts::TAU * uniform());
+                let jd = start + 0.02 * uniform();
+                for visit in 0..2 {
+                    let dt = 0.06 * visit as f64;
+                    let id = 100_000 + (n * 1000 + k * 10 + visit) as i64;
+                    owner.insert(id, 2 + n * 100 + k);
+                    detections.push(Detection {
+                        id,
+                        jd: jd + dt,
+                        ra: ra + rate * dt * angle.cos() / dec.to_radians().cos(),
+                        dec: dec + rate * dt * angle.sin(),
+                        mag: Some(19.0),
+                        mag_err: Some(0.1),
+                        band: Some('r'),
+                        site: None,
+                    });
+                }
+            }
+        }
+        let tracklets = survey_tracklets(&detections, &nights);
+        let of = |k: usize| -> Vec<usize> {
+            (0..tracklets.len())
+                .filter(|&m| tracklets[m].ids.iter().all(|id| owner[id] == k))
+                .collect()
+        };
+        assert_eq!(of(0).len(), nights.len(), "one tracklet a night");
+        assert_eq!(of(1).len(), nights.len(), "one tracklet a night");
+        assert!(
+            tracklets.len() > 50,
+            "the movers made {} tracklets",
+            tracklets.len()
+        );
+        let whole = |tracks: &[Track], k: usize| -> Option<Track> {
+            tracks.iter().find(|t| sorted_members(t) == of(k)).cloned()
+        };
+
+        let bound = survey_config(&tracklets);
+        let tracks = link_tracklets(&tracklets, &detections, &bound);
+        assert!(
+            whole(&tracks, 0).is_none(),
+            "a bound orbit fitted the whole interstellar arc"
+        );
+        assert!(tracks.iter().all(|t| is_bound(&t.state)));
+        let belt_bound = whole(&tracks, 1).expect("the main-belt object is linked");
+
+        let unbound =
+            survey_config(&tracklets).with_conics(Conics::up_to(40.0 / KM_S_PER_AU_DAY, 0.5));
+        let tracks = link_tracklets(&tracklets, &detections, &unbound);
+        for track in &tracks {
+            let objects = owners_of(track, &tracklets, &owner);
+            assert_eq!(objects.len(), 1, "a track mixes objects {objects:?}");
+        }
+        let iso = whole(&tracks, 0).expect("the interstellar object is linked whole");
+        let residual = iso.residual_arcsec.expect("fitted");
+        let el = state_to_elements(&iso.state, unbound.reference_jd).expect("an orbit");
+        assert!(residual < 0.1, "residual {residual}\"");
+        assert!(
+            el.e > 1.0 && (el.e - borisov().e).abs() < 0.1,
+            "fitted e = {}",
+            el.e
+        );
+        let belt_unbound = whole(&tracks, 1).expect("the main-belt object is still linked");
+        assert!(is_bound(&belt_unbound.state));
+        assert!(
+            (belt_unbound.residual_arcsec.unwrap() - belt_bound.residual_arcsec.unwrap()).abs()
+                < 0.01
+        );
+    }
+
+    /// An unbound search keeps main-belt tracks on ellipses, even one a hyperbola fits as well.
+    #[test]
+    fn test_an_unbound_search_keeps_main_belt_objects_bound() {
+        let nights = [2460005.70, 2460008.72, 2460012.68, 2460015.71, 2460018.69];
+        let objects: Vec<OrbitalElements> = (0..SURVEY_OBJECTS).map(survey_object).collect();
+        let (detections, _) = survey(&objects, &nights);
+        let tracklets = survey_tracklets(&detections, &nights);
+        let cfg = survey_config(&tracklets).with_conics(Conics::up_to(40.0 / KM_S_PER_AU_DAY, 0.5));
+        let tracks = link_tracklets(&tracklets, &detections, &cfg);
+        assert!(
+            tracks.len() >= SURVEY_OBJECTS - 1,
+            "only {} tracks",
+            tracks.len()
+        );
+        for track in &tracks {
+            assert!(
+                is_bound(&track.state),
+                "{:?} kept unbound at {:?}\"",
+                track.members,
+                track.residual_arcsec
+            );
+        }
+    }
+
+    #[test]
+    fn test_thor_recovers_an_interstellar_object_seen_once_a_night() {
+        use crate::utils::discovery::{thor_clusters, ThorSearch};
+        use crate::utils::identify::predict_radec_from;
+        use crate::utils::tracks::BoundFit;
+
+        let nights = [2458945.70, 2458946.71, 2458947.69, 2458948.72, 2458949.70];
+        let mut detections: Vec<Detection> = nights
+            .iter()
+            .enumerate()
+            .map(|(n, &jd)| {
+                let (ra, dec) = predict_radec_from(&borisov(), jd, &ZTF);
+                Detection {
+                    id: n as i64,
+                    jd,
+                    ra,
+                    dec,
+                    mag: Some(19.0),
+                    mag_err: Some(0.1),
+                    band: Some('r'),
+                    site: None,
+                }
+            })
+            .collect();
+        let iso: Vec<i64> = detections.iter().map(|d| d.id).collect();
+        let (ra0, dec0) = (detections[2].ra, detections[2].dec);
+        let mut seed: u64 = 7;
+        let mut uniform = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for (n, &jd) in nights.iter().enumerate() {
+            for k in 0..6 {
+                let dec = dec0 + 2.0 * (uniform() - 0.5);
+                detections.push(Detection {
+                    id: 1000 + (10 * n + k) as i64,
+                    jd: jd + 0.02 * uniform(),
+                    ra: ra0 + 2.0 * (uniform() - 0.5) / dec.to_radians().cos(),
+                    dec,
+                    mag: Some(19.0),
+                    mag_err: Some(0.1),
+                    band: Some('r'),
+                    site: None,
+                });
+            }
+        }
+
+        let bound = thor_clusters(&detections, &ThorSearch::default());
+        assert!(
+            bound
+                .iter()
+                .all(|(c, v)| v.0 != BoundFit::Good || c.ids.iter().all(|id| !iso.contains(id))),
+            "a bound orbit fitted the interstellar object: {bound:?}"
+        );
+
+        let unbound = thor_clusters(
+            &detections,
+            &ThorSearch {
+                conics: Conics::up_to(40.0 / KM_S_PER_AU_DAY, 0.5),
+                ..ThorSearch::default()
+            },
+        );
+        for (c, _) in &unbound {
+            let ours = c.ids.iter().filter(|id| iso.contains(id)).count();
+            assert!(
+                ours == 0 || ours == c.ids.len(),
+                "a cluster mixes objects {c:?}"
+            );
+        }
+        let (_, verdict) = unbound
+            .iter()
+            .find(|(c, _)| c.ids == iso)
+            .expect("the interstellar object is recovered whole");
+        assert_eq!(verdict.0, BoundFit::Good, "{verdict:?}");
+        let orbit = verdict.2.expect("an orbit is stored");
+        let el = state_to_elements(
+            &State {
+                pos: orbit.pos,
+                vel: orbit.vel,
+            },
+            orbit.epoch_jd,
+        )
+        .expect("elements");
+        assert!(
+            el.e > 1.0 && (el.e - borisov().e).abs() < 0.1,
+            "fitted e = {}",
+            el.e
+        );
     }
 
     #[test]

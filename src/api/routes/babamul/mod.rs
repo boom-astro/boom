@@ -1,3 +1,5 @@
+pub mod admin;
+pub mod embeddings;
 pub mod oauth;
 pub mod stats;
 pub mod surveys;
@@ -188,6 +190,40 @@ pub struct BabamulUser {
     /// `username` it is free text, optional, and not unique.
     #[serde(default)]
     pub name: Option<String>,
+    /// Whether this account has elevated privileges: managing other users, and
+    /// running data-mutating tasks from the admin page.
+    ///
+    /// Granted through `PATCH /babamul/admin/users/{id}`, and seeded at API
+    /// startup from `babamul.admin_emails` -- which is how a fresh deployment
+    /// gets its first admin, since nobody can grant admin through the admin
+    /// page until somebody is one. Seeding only grants, so a grant made
+    /// through the API survives a restart.
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub acls: Vec<BabamulAcl>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BabamulAcl {
+    Winter,
+    ZtfPartnership,
+    ZtfCaltech,
+}
+
+impl BabamulAcl {
+    pub const ALL: [BabamulAcl; 3] = [
+        BabamulAcl::Winter,
+        BabamulAcl::ZtfPartnership,
+        BabamulAcl::ZtfCaltech,
+    ];
+}
+
+impl BabamulUser {
+    pub fn has_acl(&self, acl: BabamulAcl) -> bool {
+        self.is_admin || self.acls.contains(&acl)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -205,6 +241,12 @@ pub struct BabamulUserPublic {
     pub orcid_id: Option<String>,
     /// Full name the user chose to display, if any
     pub name: Option<String>,
+    /// Exposed so the client knows whether to offer the admin page.
+    /// Authorization is enforced server-side on every admin route regardless.
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub acls: Vec<BabamulAcl>,
 }
 
 impl From<BabamulUser> for BabamulUserPublic {
@@ -221,6 +263,8 @@ impl From<BabamulUser> for BabamulUserPublic {
                 .collect(),
             orcid_id: user.orcid_id,
             name: user.name,
+            is_admin: user.is_admin,
+            acls: user.acls,
         }
     }
 }
@@ -228,6 +272,7 @@ impl From<BabamulUser> for BabamulUserPublic {
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct BabamulSignupPost {
     pub email: String,
+    pub name: String,
 }
 
 #[serde_as]
@@ -245,6 +290,7 @@ pub struct BabamulSignupResponse {
     request_body = BabamulSignupPost,
     responses(
         (status = 200, description = "Signup successful", body = BabamulSignupResponse),
+        (status = 400, description = "Invalid email address or name"),
         (status = 403, description = "This deployment is not creating new accounts"),
         (status = 409, description = "Email already exists"),
         (status = 500, description = "Internal server error")
@@ -268,6 +314,14 @@ pub async fn post_babamul_signup(
         return response::bad_request("Invalid email address");
     }
 
+    let name = body.name.trim();
+    if name.is_empty() {
+        return response::bad_request("Full name is required");
+    }
+    if let Err(message) = validate_name(name) {
+        return response::bad_request(&message);
+    }
+
     let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
 
     let user = match babamul_users_collection
@@ -279,10 +333,14 @@ pub async fn post_babamul_signup(
                 return duplicate_email("Email already registered (and activated)");
             }
             existing_user.activation_code = Some(uuid::Uuid::new_v4().to_string());
+            existing_user.name = Some(name.to_string());
             if let Err(e) = babamul_users_collection
                 .update_one(
                     doc! { "_id": &existing_user.id },
-                    doc! { "$set": { "activation_code": &existing_user.activation_code } },
+                    doc! { "$set": {
+                        "activation_code": &existing_user.activation_code,
+                        "name": name,
+                    } },
                 )
                 .await
             {
@@ -327,7 +385,9 @@ pub async fn post_babamul_signup(
                 password_last_changed_at: None,
                 identities: Vec::new(),
                 orcid_id: None,
-                name: None,
+                name: Some(name.to_string()),
+                is_admin: false,
+                acls: vec![],
             };
 
             if let Err(e) = babamul_users_collection.insert_one(&babamul_user).await {
@@ -983,6 +1043,21 @@ pub async fn get_babamul_profile(current_user: Option<web::ReqData<BabamulUser>>
 /// Long enough for any real name; short enough that the field is not free storage.
 const MAX_NAME_LENGTH: usize = 100;
 
+fn validate_name(name: &str) -> Result<(), String> {
+    // Characters, not bytes: `.len()` would cut a non-Latin name to a fraction.
+    if name.chars().count() > MAX_NAME_LENGTH {
+        return Err(format!(
+            "Name must be at most {} characters",
+            MAX_NAME_LENGTH
+        ));
+    }
+    // Rendered on one line: control characters only buy a caller newline smuggling.
+    if name.chars().any(char::is_control) {
+        return Err("Name cannot contain control characters".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct UpdateProfilePatch {
     /// Full name to show on the profile. A blank or whitespace-only value
@@ -1024,16 +1099,8 @@ pub async fn patch_babamul_profile(
         Some(name) => name.trim(),
     };
 
-    // Characters, not bytes: `.len()` would cut a non-Latin name to a fraction.
-    if name.chars().count() > MAX_NAME_LENGTH {
-        return response::bad_request(&format!(
-            "Name must be at most {} characters",
-            MAX_NAME_LENGTH
-        ));
-    }
-    // Rendered on one line: control characters only buy a caller newline smuggling.
-    if name.chars().any(char::is_control) {
-        return response::bad_request("Name cannot contain control characters");
+    if let Err(message) = validate_name(name) {
+        return response::bad_request(&message);
     }
 
     // Unset, not `""`: a stored empty string is a name that renders blank.

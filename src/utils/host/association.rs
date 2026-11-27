@@ -1,12 +1,15 @@
 //! The stored form of a host association: the fields a filter cuts on, at the
 //! top level of each candidate rather than nested behind `galaxy`.
 
+use apache_avro_macros::serdavro;
 use serde::{Deserialize, Serialize};
 
 use super::associate::AssociationResult;
+use super::photometry::HostPhotometry;
 
 const ARCSEC_PER_RADIAN: f64 = 206_264.806_247_096_36;
 
+#[serdavro]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredHostCandidate {
     pub objname: Option<String>,
@@ -17,6 +20,8 @@ pub struct StoredHostCandidate {
     /// False when the catalogue gave a real position angle. 2MASS diameters carry
     /// a fixed 90 degrees, which makes `d_dlr` directionally meaningless.
     pub orientation_is_nominal: bool,
+    /// REX only: band of the S/N and blending cuts, r unless r was not observed.
+    pub rex_snr_band: Option<String>,
     pub ra: f64,
     pub dec: f64,
     /// Angular separation from the transient, arcsec.
@@ -32,6 +37,10 @@ pub struct StoredHostCandidate {
     /// Normalised over all candidates considered, not just the stored ones.
     pub posterior: f64,
     pub z: Option<f64>,
+    #[serde(default)]
+    pub z_err: Option<f64>,
+    #[serde(default)]
+    pub z_type: Option<String>,
     /// Adopted distance in Mpc, redshift-independent only when
     /// `dist_mpc_method` says so.
     pub dist_mpc: Option<f64>,
@@ -39,9 +48,40 @@ pub struct StoredHostCandidate {
     pub a_arcsec: f64,
     pub b_arcsec: f64,
     pub pa_deg: f64,
+    #[serde(default)]
+    pub photometry: Option<HostPhotometry>,
+}
+
+#[serdavro]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+pub struct HostSummary {
+    pub name: Option<String>,
+    pub catalog: Option<String>,
+    pub z: Option<f64>,
+    pub dist_mpc: Option<f64>,
+    pub dist_mpc_method: Option<String>,
+    pub sep_arcsec: f64,
+    pub sep_kpc: Option<f64>,
+    pub d_dlr: f64,
+}
+
+impl From<&StoredHostCandidate> for HostSummary {
+    fn from(host: &StoredHostCandidate) -> Self {
+        Self {
+            name: host.objname.clone(),
+            catalog: host.catalog.clone(),
+            z: host.z,
+            dist_mpc: host.dist_mpc,
+            dist_mpc_method: host.dist_mpc_method.clone(),
+            sep_arcsec: host.sep_arcsec,
+            sep_kpc: host.sep_kpc,
+            d_dlr: host.d_dlr,
+        }
+    }
 }
 
 /// Host association for one object, as stored under `aux.host_galaxy`.
+#[serdavro]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HostGalaxyAssociation {
     /// Duplicate of `candidates[0]`, so consumers need not index the array.
@@ -65,6 +105,7 @@ impl HostGalaxyAssociation {
                 objtype: c.galaxy.objtype.clone(),
                 size_is_isophotal: c.galaxy.size_is_isophotal,
                 orientation_is_nominal: c.galaxy.orientation_is_nominal,
+                rex_snr_band: c.galaxy.rex_snr_band.clone(),
                 ra: c.galaxy.ra,
                 dec: c.galaxy.dec,
                 sep_arcsec: c.separation_arcsec,
@@ -79,11 +120,14 @@ impl HostGalaxyAssociation {
                 dlr_rank: c.dlr_rank,
                 posterior: c.posterior,
                 z: c.galaxy.redshift,
+                z_err: c.galaxy.redshift_err,
+                z_type: c.galaxy.redshift_type.clone(),
                 dist_mpc: c.galaxy.dist_mpc,
                 dist_mpc_method: c.galaxy.dist_mpc_method.clone(),
                 a_arcsec: c.galaxy.a_arcsec,
                 b_arcsec: c.galaxy.b_arcsec,
                 pa_deg: c.galaxy.pa_deg,
+                photometry: None,
             })
             .collect();
 
@@ -123,6 +167,7 @@ mod tests {
             pa_deg: 0.0,
             redshift: Some(0.004),
             redshift_err: Some(0.000_1),
+            redshift_type: None,
             dist_mpc,
             dist_mpc_method: dist_mpc.map(|_| "zIndependent".to_string()),
             mag: None,
@@ -133,6 +178,7 @@ mod tests {
             size_is_isophotal: true,
             diam_survey: None,
             orientation_is_nominal: false,
+            rex_snr_band: None,
         }
     }
 

@@ -6,11 +6,16 @@ use crate::{
             logging::{as_error, log_error, WARN},
             metrics::CONSUMER_METER,
         },
+        retry::{
+            is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
+        },
     },
 };
 
+use std::future::Future;
 use std::sync::{Arc, LazyLock};
 
+use crate::utils::ingest_stats;
 use indicatif::ProgressBar;
 use opentelemetry::{metrics::Counter, KeyValue};
 use rdkafka::{
@@ -18,7 +23,7 @@ use rdkafka::{
     client::DefaultClientContext,
     config::ClientConfig,
     consumer::{BaseConsumer, CommitMode, Consumer},
-    error::{KafkaError, KafkaResult},
+    error::{KafkaError, KafkaResult, RDKafkaErrorCode},
     message::Message,
     producer::{FutureProducer, FutureRecord, Producer},
     TopicPartitionList,
@@ -61,6 +66,10 @@ fn get_partition_ids(
         Some(topic) => topic,
         None => return Ok(None),
     };
+    if topic.error().map(RDKafkaErrorCode::from) == Some(RDKafkaErrorCode::UnknownTopicOrPartition)
+    {
+        return Ok(None);
+    }
     let partition_ids = topic
         .partitions()
         .iter()
@@ -173,6 +182,17 @@ pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(
 
     let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
     admin_client.delete_topics(&[topic_name], &opts).await?;
+
+    // Poll until the deletion reaches broker metadata, else count_messages() sees the old topic.
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+    for attempt in 0..20u64 {
+        if get_partition_ids(&consumer, topic_name)?.is_none() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+    }
     Ok(())
 }
 
@@ -468,6 +488,12 @@ pub fn subscription_window(timestamp: i64, window_days: u64) -> Vec<chrono::Naiv
         .collect()
 }
 
+#[derive(Clone)]
+pub struct QueueRouter {
+    pub queues: Vec<String>,
+    pub route: Arc<dyn Fn(&[u8]) -> usize + Send + Sync>,
+}
+
 #[async_trait::async_trait]
 pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
     /// Concrete topic name(s) for a specific date.
@@ -481,6 +507,9 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
     /// topic the cluster advertises, i.e. every past night, almost all expired.
     fn subscription_topics(&self, timestamp: i64, window_days: u64) -> Vec<String>;
     fn output_queue(&self) -> String;
+    fn router(&self) -> Option<QueueRouter> {
+        None
+    }
     fn survey(&self) -> &'static str;
     #[instrument(skip(self))]
     async fn clear_output_queue(&self, config_path: &str) -> Result<(), ConsumerError> {
@@ -547,17 +576,20 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
             }
         };
 
+        let router = self.router();
         let mut handles = vec![];
         for i in 0..n_threads {
             let subscribe_to = subscribe_to.clone();
             let output_queue = self.output_queue();
+            let router = router.clone();
             let config = config.clone();
             let kafka_config = kafka_config.clone();
             let handle = tokio::spawn(async move {
-                let result = consumer(
+                let result = consume_into(
                     &i.to_string(),
                     subscribe_to,
                     &output_queue,
+                    router.as_ref(),
                     max_in_queue,
                     plan,
                     &config,
@@ -908,6 +940,63 @@ fn is_expired_partition(error: &KafkaError) -> bool {
     )
 }
 
+async fn retry_valkey<T, Fut>(
+    operation: &'static str,
+    op: impl FnMut() -> Fut,
+) -> Result<T, redis::RedisError>
+where
+    Fut: Future<Output = Result<T, redis::RedisError>>,
+{
+    retry_transient(
+        operation,
+        DEFAULT_MAX_RETRIES,
+        DEFAULT_BASE_BACKOFF,
+        is_transient_redis_error,
+        || {},
+        op,
+    )
+    .await
+}
+
+fn queue_payload<M: Message>(message: &M) -> Vec<u8> {
+    let received_ms = message
+        .timestamp()
+        .to_millis()
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    ingest_stats::wrap(received_ms, message.payload().unwrap_or_default())
+}
+
+async fn largest_queue_length(
+    con: &redis::aio::MultiplexedConnection,
+    queues: &[&str],
+) -> Result<usize, redis::RedisError> {
+    let mut largest = 0;
+    for queue in queues {
+        let length = retry_valkey("valkey_llen", || {
+            let mut con = con.clone();
+            async move { con.llen::<&str, usize>(queue).await }
+        })
+        .await?;
+        largest = largest.max(length);
+    }
+    Ok(largest)
+}
+
+async fn push_to_queue(
+    con: &redis::aio::MultiplexedConnection,
+    queue: &str,
+    payload: &[u8],
+) -> Result<usize, redis::RedisError> {
+    retry_valkey("valkey_rpush", || {
+        let mut con = con.clone();
+        async move {
+            con.rpush::<&str, Vec<u8>, usize>(queue, payload.to_vec())
+                .await
+        }
+    })
+    .await
+}
+
 // No `#[instrument]` here: this function is the long-lived Kafka poll loop;
 // instrumenting it would funnel every per-message span into one giant trace.
 pub async fn consumer(
@@ -921,6 +1010,43 @@ pub async fn consumer(
     exit_on_eof: bool,
     survey: &'static str,
 ) -> Result<(), ConsumerError> {
+    consume_into(
+        id,
+        subscribe_to,
+        output_queue,
+        None,
+        max_in_queue,
+        plan,
+        config,
+        survey_consumer_config,
+        exit_on_eof,
+        survey,
+    )
+    .await
+}
+
+async fn consume_into(
+    id: &str,
+    subscribe_to: Arc<dyn Fn(i64, u64) -> Vec<String> + Send + Sync>,
+    output_queue: &str,
+    router: Option<&QueueRouter>,
+    max_in_queue: usize,
+    plan: StartPlan,
+    config: &AppConfig,
+    survey_consumer_config: &KafkaConsumerConfig,
+    exit_on_eof: bool,
+    survey: &'static str,
+) -> Result<(), ConsumerError> {
+    let queue_of = |payload: &[u8]| -> &str {
+        match router {
+            Some(router) => &router.queues[(router.route)(payload)],
+            None => output_queue,
+        }
+    };
+    let watched_queues: Vec<&str> = match router {
+        Some(router) => router.queues.iter().map(String::as_str).collect(),
+        None => vec![output_queue],
+    };
     let replay = plan.replay;
     let server = survey_consumer_config.server.clone();
     // Own group, per date, so a replay never rebalances the long-running consumers.
@@ -1066,12 +1192,22 @@ pub async fn consumer(
             );
         }
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
-            Some(Ok(_msg)) => {
+            Some(Ok(msg)) => {
                 debug!("Got initial assignment, positioning partitions...");
                 if replay {
                     // Replay: (re)read from the timestamp; `position_partitions` commits.
                     seek_to_timestamp(&consumer, plan.position_timestamp * 1000)?;
-                } else if !position_or_warn(&consumer, position_timestamp * 1000, &mut positioned) {
+                } else if positioned.contains(&(msg.topic().to_string(), msg.partition())) {
+                    consumer.seek(
+                        msg.topic(),
+                        msg.partition(),
+                        rdkafka::Offset::Offset(msg.offset()),
+                        KAFKA_TIMEOUT_SECS,
+                    )?;
+                }
+                if !replay
+                    && !position_or_warn(&consumer, position_timestamp * 1000, &mut positioned)
+                {
                     // Consuming unpositioned would replay an old night from
                     // `earliest`; poll again and retry.
                     continue;
@@ -1144,7 +1280,7 @@ pub async fn consumer(
         ])
         .collect();
 
-    let mut con = config
+    let con = config
         .build_redis()
         .await
         .inspect_err(as_error!("failed to connect to redis"))?;
@@ -1195,8 +1331,7 @@ pub async fn consumer(
             // `max.poll.interval.ms` (5 min) is fenced out of the group.
             let mut paused = false;
             loop {
-                let nb_in_queue = con
-                    .llen::<&str, usize>(&output_queue)
+                let nb_in_queue = largest_queue_length(&con, &watched_queues)
                     .await
                     .inspect_err(as_error!("failed to get queue length"))?;
                 if nb_in_queue < max_in_queue {
@@ -1212,13 +1347,17 @@ pub async fn consumer(
                 }
                 // Yields nothing while paused, but forwards anything still in flight.
                 if let Some(Ok(message)) = consumer.poll(core::time::Duration::from_millis(500)) {
-                    let payload = message.payload().unwrap_or_default();
-                    con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
-                        .await
-                        .inspect_err(|error| {
-                            log_error!(error, "failed to push message to queue");
-                            ALERT_PROCESSED.add(1, &output_error_attrs);
-                        })?;
+                    let payload = queue_payload(&message);
+                    push_to_queue(
+                        &con,
+                        queue_of(message.payload().unwrap_or_default()),
+                        &payload,
+                    )
+                    .await
+                    .inspect_err(|error| {
+                        log_error!(error, "failed to push message to queue");
+                        ALERT_PROCESSED.add(1, &output_error_attrs);
+                    })?;
                     if !replay {
                         if let Err(error) = consumer.store_offset_from_message(&message) {
                             log_error!(error, "failed to store offset");
@@ -1235,13 +1374,17 @@ pub async fn consumer(
         }
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
             Some(Ok(message)) => {
-                let payload = message.payload().unwrap_or_default();
-                con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
-                    .await
-                    .inspect_err(|error| {
-                        log_error!(error, "failed to push message to queue");
-                        ALERT_PROCESSED.add(1, &output_error_attrs);
-                    })?;
+                let payload = queue_payload(&message);
+                push_to_queue(
+                    &con,
+                    queue_of(message.payload().unwrap_or_default()),
+                    &payload,
+                )
+                .await
+                .inspect_err(|error| {
+                    log_error!(error, "failed to push message to queue");
+                    ALERT_PROCESSED.add(1, &output_error_attrs);
+                })?;
                 trace!("Pushed message to redis");
                 // Mark processed so the periodic auto-commit advances the offset
                 // (only the prod path commits; a replay never stores).

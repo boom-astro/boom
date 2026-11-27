@@ -1,0 +1,272 @@
+use crate::conf::MilvusConfig;
+use base64::{engine::general_purpose, Engine as _};
+use std::time::Duration;
+use tonic::{
+    metadata::{Ascii, MetadataValue},
+    service::interceptor::InterceptedService,
+    service::Interceptor,
+    transport::{Channel, ClientTlsConfig, Endpoint},
+    Request, Status,
+};
+use tracing::{debug, info, instrument};
+
+use super::proto::common::Status as MilvusStatus;
+use super::proto::milvus::milvus_service_client::MilvusServiceClient;
+use super::proto::milvus::{GetVersionRequest, ListDatabasesRequest, ShowCollectionsRequest};
+
+#[derive(thiserror::Error, Debug)]
+pub enum MilvusError {
+    #[error("invalid milvus endpoint {0}")]
+    InvalidEndpoint(String),
+    #[error("invalid milvus credentials (could not be encoded as a gRPC header)")]
+    InvalidCredentials,
+    #[error("failed to connect to milvus")]
+    ConnectError(#[source] tonic::transport::Error),
+    #[error("milvus rpc failed: {0}")]
+    RpcError(#[from] Status),
+    #[error("milvus returned an error (code {code}): {reason}")]
+    ServerError { code: i32, reason: String },
+    #[error("milvus returned an empty status for {0}")]
+    MissingStatus(&'static str),
+    #[error("milvus is not enabled in the configuration")]
+    NotEnabled,
+    #[error(
+        "milvus is enabled but BOOM_MILVUS__USERNAME and BOOM_MILVUS__PASSWORD are not both set"
+    )]
+    MissingCredentials,
+    #[error("embedding has {got} dimensions but the collection expects {expected}")]
+    DimensionMismatch { expected: i64, got: usize },
+}
+
+/// Attaches credentials and the target database to every outgoing request.
+#[derive(Clone)]
+pub struct AuthInterceptor {
+    authorization: MetadataValue<Ascii>,
+    dbname: Option<MetadataValue<Ascii>>,
+}
+
+impl Interceptor for AuthInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        request
+            .metadata_mut()
+            .insert("authorization", self.authorization.clone());
+
+        if let Some(dbname) = &self.dbname {
+            request.metadata_mut().insert("dbname", dbname.clone());
+        }
+
+        Ok(request)
+    }
+}
+
+/// A connected Milvus client.
+///
+/// Cheap to clone: the underlying tonic `Channel` shares one connection pool.
+#[derive(Clone)]
+pub struct MilvusClient {
+    inner: MilvusServiceClient<InterceptedService<Channel, AuthInterceptor>>,
+    config: MilvusConfig,
+}
+
+impl MilvusClient {
+    /// Connect to Milvus using the supplied configuration.
+    ///
+    /// Returns [`MilvusError::NotEnabled`] if both Milvus flags are false, so that
+    /// callers cannot accidentally dial a server the operator has switched off.
+    #[instrument(skip_all, err, fields(endpoint = %config.endpoint(), database = %config.database))]
+    pub async fn connect(config: &MilvusConfig) -> Result<Self, MilvusError> {
+        let channel = Self::build_endpoint(config)?
+            .connect()
+            .await
+            .map_err(MilvusError::ConnectError)?;
+        info!(endpoint = %config.endpoint(), "connected to milvus");
+        Self::with_channel(config, channel)
+    }
+
+    /// Build a client without dialing. The connection is opened by the first
+    /// RPC, and tonic redials on a later RPC if it fails, so a long-lived
+    /// caller recovers from an outage without being restarted. Errors only for
+    /// configuration that will never connect.
+    pub fn connect_lazy(config: &MilvusConfig) -> Result<Self, MilvusError> {
+        let channel = Self::build_endpoint(config)?.connect_lazy();
+        Self::with_channel(config, channel)
+    }
+
+    fn build_endpoint(config: &MilvusConfig) -> Result<Endpoint, MilvusError> {
+        if !config.is_enabled() {
+            return Err(MilvusError::NotEnabled);
+        }
+        if config.username.is_empty() || config.password.is_empty() {
+            return Err(MilvusError::MissingCredentials);
+        }
+
+        let endpoint_url = config.endpoint();
+        let mut endpoint = Endpoint::from_shared(endpoint_url.clone())
+            .map_err(|_| MilvusError::InvalidEndpoint(endpoint_url))?
+            .timeout(Duration::from_secs(config.timeout_seconds))
+            .connect_timeout(Duration::from_secs(config.connect_timeout_seconds));
+
+        if config.tls {
+            // NRP serves a standard Let's Encrypt certificate, so the platform
+            // root store is all we need — no custom CA or client identity.
+            let tls = ClientTlsConfig::new()
+                .domain_name(config.host.clone())
+                .with_native_roots();
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(MilvusError::ConnectError)?;
+        }
+        Ok(endpoint)
+    }
+
+    fn with_channel(config: &MilvusConfig, channel: Channel) -> Result<Self, MilvusError> {
+        let interceptor = Self::build_interceptor(config)?;
+        Ok(Self {
+            inner: MilvusServiceClient::with_interceptor(channel, interceptor),
+            config: config.clone(),
+        })
+    }
+
+    fn build_interceptor(config: &MilvusConfig) -> Result<AuthInterceptor, MilvusError> {
+        // Milvus expects the raw base64 of "user:password", with no auth scheme.
+        let encoded =
+            general_purpose::STANDARD.encode(format!("{}:{}", config.username, config.password));
+        let authorization: MetadataValue<Ascii> = encoded
+            .parse()
+            .map_err(|_| MilvusError::InvalidCredentials)?;
+
+        let dbname = if config.database.is_empty() {
+            None
+        } else {
+            Some(
+                config
+                    .database
+                    .parse()
+                    .map_err(|_| MilvusError::InvalidEndpoint(config.database.clone()))?,
+            )
+        };
+
+        Ok(AuthInterceptor {
+            authorization,
+            dbname,
+        })
+    }
+
+    pub fn config(&self) -> &MilvusConfig {
+        &self.config
+    }
+
+    pub(super) fn service(
+        &mut self,
+    ) -> &mut MilvusServiceClient<InterceptedService<Channel, AuthInterceptor>> {
+        &mut self.inner
+    }
+
+    /// The Milvus server version, useful for confirming the vendored protos
+    /// still match what the server speaks.
+    #[instrument(skip_all, err)]
+    pub async fn version(&mut self) -> Result<String, MilvusError> {
+        let response = self
+            .inner
+            .get_version(GetVersionRequest {})
+            .await?
+            .into_inner();
+
+        check_status(response.status.as_ref(), "GetVersion")?;
+
+        Ok(response.version)
+    }
+
+    /// Databases visible to these credentials.
+    #[instrument(skip_all, err)]
+    pub async fn list_databases(&mut self) -> Result<Vec<String>, MilvusError> {
+        let response = self
+            .inner
+            .list_databases(ListDatabasesRequest::default())
+            .await?
+            .into_inner();
+
+        check_status(response.status.as_ref(), "ListDatabases")?;
+
+        Ok(response.db_names)
+    }
+
+    /// Collections in the configured database.
+    #[instrument(skip_all, err)]
+    pub async fn list_collections(&mut self) -> Result<Vec<String>, MilvusError> {
+        let request = ShowCollectionsRequest {
+            db_name: self.config.database.clone(),
+            ..Default::default()
+        };
+
+        let response = self.inner.show_collections(request).await?.into_inner();
+
+        check_status(response.status.as_ref(), "ShowCollections")?;
+
+        debug!(
+            count = response.collection_names.len(),
+            "listed collections"
+        );
+
+        Ok(response.collection_names)
+    }
+}
+
+/// Milvus reports application-level failures in a `Status` message rather than
+/// as a gRPC error, so every response has to be checked explicitly.
+pub(super) fn check_status(
+    status: Option<&MilvusStatus>,
+    operation: &'static str,
+) -> Result<(), MilvusError> {
+    let status = status.ok_or(MilvusError::MissingStatus(operation))?;
+
+    // `code` is the modern field; `error_code` is the deprecated 2.x one. A
+    // server may set either, so treat a non-zero value in either as a failure.
+    #[allow(deprecated)]
+    let failed = status.code != 0 || status.error_code != 0;
+
+    if failed {
+        #[allow(deprecated)]
+        let code = if status.code != 0 {
+            status.code
+        } else {
+            status.error_code
+        };
+
+        return Err(MilvusError::ServerError {
+            code,
+            reason: if status.reason.is_empty() {
+                status.detail.clone()
+            } else {
+                status.reason.clone()
+            },
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(username: &str, password: &str) -> MilvusConfig {
+        MilvusConfig {
+            read_embeddings: true,
+            username: username.to_string(),
+            password: password.to_string(),
+            ..MilvusConfig::default()
+        }
+    }
+
+    #[test]
+    fn build_endpoint_requires_both_credentials() {
+        for (username, password) in [("", ""), ("user", ""), ("", "pass")] {
+            assert!(matches!(
+                MilvusClient::build_endpoint(&config(username, password)),
+                Err(MilvusError::MissingCredentials)
+            ));
+        }
+        assert!(MilvusClient::build_endpoint(&config("user", "pass")).is_ok());
+    }
+}

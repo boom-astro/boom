@@ -28,6 +28,7 @@ pub struct GalaxyCandidate {
     pub pa_deg: f64,
     pub redshift: Option<f64>,
     pub redshift_err: Option<f64>,
+    pub redshift_type: Option<String>,
     /// Adopted distance in Mpc, redshift-independent only when
     /// `dist_mpc_method` says so.
     pub dist_mpc: Option<f64>,
@@ -46,6 +47,7 @@ pub struct GalaxyCandidate {
     pub diam_survey: Option<String>,
     /// Whether the position angle is a catalogue default rather than measured.
     pub orientation_is_nominal: bool,
+    pub rex_snr_band: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

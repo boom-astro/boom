@@ -32,6 +32,39 @@ pub const DEFAULT_G12: f64 = 0.5;
 /// away. They are static sources near the predicted track.
 pub const MAX_SEPARATION_ARCSEC: f64 = 20.0;
 
+/// Keeps outbursts, which are found within 2" of the prediction.
+pub const INTERLOPER_MIN_SEPARATION_ARCSEC: f64 = 2.0;
+pub const INTERLOPER_MIN_EXCESS_MAG: f64 = 2.0;
+pub const ON_REFERENCE_SOURCE_ARCSEC: f64 = 1.5;
+
+pub fn is_static_interloper(
+    separation: f64,
+    predicted_mag: Option<f64>,
+    mag: f64,
+    ndethist: Option<f64>,
+    distnr: Option<f64>,
+) -> bool {
+    let static_source = ndethist.is_some_and(|n| n > 1.0)
+        || distnr.is_some_and(|d| (0.0..ON_REFERENCE_SOURCE_ARCSEC).contains(&d));
+    separation >= INTERLOPER_MIN_SEPARATION_ARCSEC
+        && predicted_mag.is_some_and(|p| p >= 0.0 && mag < p - INTERLOPER_MIN_EXCESS_MAG)
+        && static_source
+}
+
+pub fn stored_static_interloper(candidate: &mongodb::bson::Document) -> bool {
+    let number = |key: &str| candidate.get(key).and_then(crate::utils::bson_number);
+    match (number("ssdistnr"), number("magpsf")) {
+        (Some(separation), Some(mag)) => is_static_interloper(
+            separation,
+            number("ssmagnr"),
+            mag,
+            number("ndethist"),
+            number("distnr"),
+        ),
+        _ => false,
+    }
+}
+
 /// One photometric point in the window.
 #[derive(Debug, Clone, Copy)]
 pub struct Point {
@@ -421,6 +454,38 @@ mod tests {
                 "phase {phase}: got {got}, sbpy {expected}"
             );
         }
+    }
+
+    #[test]
+    fn test_static_interloper() {
+        assert!(is_static_interloper(
+            9.0,
+            Some(21.3),
+            12.4,
+            Some(79.0),
+            Some(3.5)
+        ));
+        assert!(!is_static_interloper(
+            1.0,
+            Some(21.3),
+            12.4,
+            Some(79.0),
+            Some(0.5)
+        ));
+        assert!(!is_static_interloper(
+            9.0,
+            Some(21.3),
+            18.6,
+            Some(1.0),
+            Some(9.8)
+        ));
+        assert!(!is_static_interloper(
+            9.0,
+            None,
+            12.4,
+            Some(79.0),
+            Some(0.5)
+        ));
     }
 
     #[test]

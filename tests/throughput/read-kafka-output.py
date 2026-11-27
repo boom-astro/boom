@@ -1,6 +1,6 @@
 """Script to read the Kafka output from the BOOM throughput test."""
 # /// script
-# requires-python = ">=3.13"
+# requires-python = ">=3.13,<3.15"
 # dependencies = [
 #     "confluent-kafka",
 # ]
@@ -39,7 +39,7 @@ try:
 finally:
     consumer.close()
 
-n_expected = 22674
+n_expected = 22677
 
 if n_alerts != n_expected:
     raise RuntimeError(f"Expected {n_expected} alerts, but got {n_alerts}")

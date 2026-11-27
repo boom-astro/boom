@@ -1,0 +1,6 @@
+# torch is installed separately in the Dockerfile, from the CPU-only index.
+# tempo-hyrax is installed there too, with --no-deps: see predictor.py.
+fastapi>=0.115,<1
+uvicorn>=0.32,<1
+numpy>=1.24,<3
+pandas>=2.0,<3

@@ -1,11 +1,14 @@
 #[cfg(target_os = "linux")]
 use boom::utils::gpu::validate_gpu_configuration_for_survey;
 use boom::{
-    alert::recover_temp_queue,
+    alert::{recover_temp_queue, ArgusLane},
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
-    scheduler::{record_mpc_orbits_state, record_worker_pool_state, ThreadPool},
+    milvus::{MilvusClient, MilvusError},
+    scheduler::{
+        record_mpc_orbits_state, record_worker_pool_state, take_heartbeat_counts, ThreadPool,
+    },
     utils::{
         db::{initialize_angular_size_indexes, initialize_survey_indexes},
         enums::Survey,
@@ -27,7 +30,10 @@ use mongodb::bson::{doc, Document};
 use mongodb::{Collection, Database};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tokio::sync::oneshot;
+use tokio::{
+    sync::oneshot,
+    time::{sleep, timeout},
+};
 use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
 
@@ -38,9 +44,41 @@ const MPC_ORBITS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often to re-check. Well inside the max age, so a single failed attempt
 /// still leaves several before the catalogue is actually stale.
 const MPC_ORBITS_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
+const MPC_ORBITS_STARTUP_WAIT: Duration = Duration::from_secs(5 * 60);
 
-fn pool_state(pool: &ThreadPool) -> String {
-    format!("{}/{}", pool.live_worker_count(), pool.total_worker_count())
+fn pool_state(pools: &[ThreadPool]) -> String {
+    let (live, total) = pools_counts(pools);
+    format!("{}/{}", live, total)
+}
+
+fn lane_pools(
+    worker_type: WorkerType,
+    default: usize,
+    lanes: &std::collections::HashMap<String, usize>,
+    config_path: &str,
+) -> Vec<ThreadPool> {
+    ArgusLane::ALL
+        .iter()
+        .map(|lane| {
+            ThreadPool::with_queues(
+                worker_type,
+                lanes.get(lane.slug()).copied().unwrap_or(default),
+                Survey::Argus,
+                config_path.to_string(),
+                lane.worker_queues(worker_type),
+                None,
+            )
+        })
+        .collect()
+}
+
+fn pools_counts(pools: &[ThreadPool]) -> (usize, usize) {
+    pools.iter().fold((0, 0), |(live, total), pool| {
+        (
+            live + pool.live_worker_count(),
+            total + pool.total_worker_count(),
+        )
+    })
 }
 
 /// Whether the catalogue is due a refresh. An absent one always is.
@@ -48,64 +86,134 @@ fn mpc_orbits_needs_refresh(age_seconds: Option<f64>, max_age: Duration) -> bool
     age_seconds.is_none_or(|age| age >= max_age.as_secs_f64())
 }
 
-/// Keep `MPC_orbits` fresh for as long as the scheduler runs.
-///
-/// A missing catalogue costs geometry silently -- the alert still enriches
-/// without it -- so this runs unattended, and the startup check covers a fresh
-/// deployment. A failed refresh leaves the previous catalogue in place.
-async fn keep_mpc_orbits_fresh(db: Database) {
-    let mut tick = tokio::time::interval(MPC_ORBITS_CHECK_INTERVAL);
+async fn keep_mpc_orbits_fresh(db: Database, first_check_done: oneshot::Sender<()>) {
+    refresh_mpc_orbits_if_due(&db).await;
+    let _ = first_check_done.send(());
     loop {
-        // Fires immediately on the first pass, so startup is covered.
-        tick.tick().await;
+        sleep(MPC_ORBITS_CHECK_INTERVAL).await;
+        refresh_mpc_orbits_if_due(&db).await;
+    }
+}
 
-        let now = chrono::Utc::now().timestamp() as f64;
-        let age = match mpcorb::orbits_age_seconds(&db, now).await {
-            Ok(age) => age,
-            // An unknown age is not an absent one: do not re-download on a blip.
-            Err(error) => {
-                log_error!(WARN, error, "could not read the age of MPC_orbits");
-                continue;
+async fn refresh_mpc_orbits_if_due(db: &Database) {
+    let now = chrono::Utc::now().timestamp() as f64;
+    let age = match mpcorb::orbits_age_seconds(db, now).await {
+        Ok(age) => age,
+        // An unknown age is not an absent one: do not re-download on a blip.
+        Err(error) => {
+            log_error!(WARN, error, "could not read the age of MPC_orbits");
+            return;
+        }
+    };
+    let count = db
+        .collection::<Document>(mpcorb::ORBITS_COLLECTION)
+        .estimated_document_count()
+        .await
+        .ok();
+    record_mpc_orbits_state(age, count);
+
+    if !mpc_orbits_needs_refresh(age, MPC_ORBITS_MAX_AGE) {
+        info!(
+            age_hours = age.unwrap_or(0.0) / 3600.0,
+            orbits = count.unwrap_or(0),
+            "MPC_orbits is current"
+        );
+        keep_live_epoch(db, false).await;
+        return;
+    }
+    match age {
+        Some(age) => info!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
+        None => warn!("MPC_orbits is missing, populating it"),
+    }
+
+    // No progress bar: this output is a log, not a terminal.
+    match mpcorb::refresh_orbits(Some(db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now, false).await {
+        Ok(report) => {
+            for sample in &report.rejected_samples {
+                warn!("rejected record-shaped line: {}", sample);
             }
-        };
-        let count = db
-            .collection::<Document>(mpcorb::ORBITS_COLLECTION)
-            .estimated_document_count()
-            .await
-            .ok();
-        record_mpc_orbits_state(age, count);
-
-        if !mpc_orbits_needs_refresh(age, MPC_ORBITS_MAX_AGE) {
             info!(
-                age_hours = age.unwrap_or(0.0) / 3600.0,
-                orbits = count.unwrap_or(0),
-                "MPC_orbits is current"
+                orbits = report.parsed,
+                skipped = report.skipped,
+                "MPC_orbits refreshed"
             );
-            continue;
+            record_mpc_orbits_state(Some(0.0), Some(report.parsed));
+            keep_live_epoch(db, true).await;
         }
-        match age {
-            Some(age) => info!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
-            None => warn!("MPC_orbits is missing, populating it"),
-        }
+        // The previous catalogue survives a failure, so geometry keeps working.
+        Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
+    }
+}
 
-        // No progress bar: this output is a log, not a terminal.
-        match mpcorb::refresh_orbits(Some(&db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now, false)
-            .await
-        {
-            Ok(report) => {
-                for sample in &report.rejected_samples {
-                    warn!("rejected record-shaped line: {}", sample);
-                }
-                info!(
-                    orbits = report.parsed,
-                    skipped = report.skipped,
-                    "MPC_orbits refreshed"
-                );
-                record_mpc_orbits_state(Some(0.0), Some(report.parsed));
-            }
-            // The previous catalogue survives a failure, so geometry keeps working.
-            Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
+const LIVE_EPOCH_LEAD_DAYS: f64 = 7.0;
+const LIVE_EPOCH_KEEP_DAYS: f64 = 30.0;
+const LIVE_EPOCH_THREADS: usize = 4;
+
+async fn keep_live_epoch(db: &Database, refreshed: bool) {
+    let now_jd = flare::Time::now().to_jd();
+    let current = match mpcorb::stored_epochs(
+        db,
+        now_jd - LIVE_EPOCH_LEAD_DAYS,
+        now_jd + LIVE_EPOCH_LEAD_DAYS,
+        true,
+    )
+    .await
+    {
+        Ok(epochs) => epochs.into_iter().max_by(f64::total_cmp),
+        Err(error) => {
+            log_error!(WARN, error, "could not read the live propagation epochs");
+            return;
         }
+    };
+    if current.is_some() && !refreshed {
+        return;
+    }
+    let orbits = match mpcorb::load_mpcorb(db).await {
+        Ok(orbits) => orbits,
+        Err(error) => {
+            log_error!(WARN, error, "could not read MPC_orbits to propagate");
+            return;
+        }
+    };
+    let (epoch, orbits) = match current {
+        Some(epoch) => match mpcorb::stale_orbits(db, orbits, epoch).await {
+            Ok(stale) => (epoch, stale),
+            Err(error) => {
+                log_error!(WARN, error, "could not read the live propagation epoch");
+                return;
+            }
+        },
+        None => ((now_jd + LIVE_EPOCH_LEAD_DAYS).floor() + 0.5, orbits),
+    };
+    info!(
+        epoch,
+        orbits = orbits.len(),
+        "propagating MPC_orbits to the live epoch"
+    );
+    match mpcorb::propagate_to_epochs(
+        db,
+        &orbits,
+        &[epoch],
+        true,
+        LIVE_EPOCH_THREADS,
+        |_, _| async { true },
+    )
+    .await
+    {
+        Ok(written) => info!(epoch, written, "live epoch propagated"),
+        Err(error) => {
+            log_error!(WARN, error, "N-body propagation to the live epoch failed");
+            return;
+        }
+    }
+    match mpcorb::stored_epochs(db, 0.0, now_jd - LIVE_EPOCH_KEEP_DAYS, true).await {
+        Ok(old) if !old.is_empty() => {
+            if let Err(error) = mpcorb::drop_epochs(db, &old).await {
+                log_error!(WARN, error, "could not drop old live epochs");
+            }
+        }
+        Ok(_) => {}
+        Err(error) => log_error!(WARN, error, "could not list old live epochs"),
     }
 }
 
@@ -229,6 +337,38 @@ async fn run(
         .await
         .expect("could not initialize indexes");
 
+    // Create the Milvus collection once, up front, to avoid workers racing to
+    // create it themselves. Safe to call if it already exists. ZTF-only.
+    //
+    // Logged rather than fatal: Milvus is an optional add-on, so a provisioning
+    // failure must not stop the scheduler from ingesting alerts. The enrichment
+    // workers pause their uploads and retry, so this recovers on its own once
+    // Milvus is reachable and the collection exists. Missing credentials never
+    // recover, so they are fatal.
+    if config.milvus.write_embeddings && args.survey == Survey::Ztf {
+        match MilvusClient::connect(&config.milvus).await {
+            Ok(mut milvus) => {
+                if let Err(error) = milvus.ensure_embedding_collection().await {
+                    log_error!(
+                        WARN,
+                        error,
+                        "could not provision the milvus embeddings collection; \
+                         embedding uploads will be paused until it exists"
+                    );
+                }
+            }
+            Err(MilvusError::MissingCredentials) => {
+                panic!("milvus.write_embeddings is on but BOOM_MILVUS__USERNAME and BOOM_MILVUS__PASSWORD are not both set")
+            }
+            Err(error) => log_error!(
+                WARN,
+                error,
+                "could not connect to milvus to provision the embeddings collection; \
+                 embedding uploads will be paused until it is reachable"
+            ),
+        }
+    }
+
     if let Some(xmatch_configs) = config.crossmatch.get(&args.survey) {
         initialize_angular_size_indexes(xmatch_configs, &db)
             .await
@@ -237,16 +377,25 @@ async fn run(
 
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
 
-    // Only ZTF needs these; LSST carries the vectors in its own packet.
-    if args.survey == Survey::Ztf {
-        tokio::spawn(
-            keep_mpc_orbits_fresh(db.clone()).instrument(info_span!("mpc orbits refresh")),
-        );
-    }
-
     #[cfg(target_os = "linux")]
     validate_gpu_configuration_for_survey(&args.survey, &config)
         .expect("GPU configuration is invalid for the survey");
+
+    // Only ZTF needs these; LSST carries the vectors in its own packet.
+    if args.survey == Survey::Ztf {
+        let (first_check_done, first_check) = oneshot::channel();
+        tokio::spawn(
+            keep_mpc_orbits_fresh(db.clone(), first_check_done)
+                .instrument(info_span!("mpc orbits refresh")),
+        );
+        // Enrichment stores geometry for good, so let a due refresh land before it starts.
+        if timeout(MPC_ORBITS_STARTUP_WAIT, first_check).await.is_err() {
+            warn!(
+                waited_seconds = MPC_ORBITS_STARTUP_WAIT.as_secs(),
+                "MPC_orbits refresh is still running, starting the workers anyway"
+            );
+        }
+    }
 
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(
@@ -273,12 +422,27 @@ async fn run(
         None
     };
 
+    let alert_queues: Vec<String> = if args.survey == Survey::Argus {
+        ArgusLane::ALL.iter().map(ArgusLane::alert_queue).collect()
+    } else {
+        vec![args.survey.alert_input_queue()]
+    };
+
     match config.build_redis().await {
-        Ok(mut con) => match recover_temp_queue(&mut con, &args.survey.alert_input_queue()).await {
-            Ok(0) => {}
-            Ok(recovered) => warn!(recovered, "requeued alerts left in the alert temp queue"),
-            Err(error) => log_error!(WARN, error, "failed to recover the alert temp queue"),
-        },
+        Ok(mut con) => {
+            for queue in &alert_queues {
+                match recover_temp_queue(&mut con, queue).await {
+                    Ok(0) => {}
+                    Ok(recovered) => {
+                        warn!(
+                            recovered,
+                            queue, "requeued alerts left in the alert temp queue"
+                        )
+                    }
+                    Err(error) => log_error!(WARN, error, "failed to recover the alert temp queue"),
+                }
+            }
+        }
         Err(error) => log_error!(
             WARN,
             error,
@@ -286,47 +450,71 @@ async fn run(
         ),
     }
 
-    let mut alert_pool = ThreadPool::new(
-        WorkerType::Alert,
-        n_alert,
-        args.survey.clone(),
-        config_path.clone(),
-        None,
-    );
-    let mut enrichment_pool = ThreadPool::new(
-        WorkerType::Enrichment,
-        n_enrichment,
-        args.survey.clone(),
-        config_path.clone(),
-        shared_model_pool,
-    );
-    let mut filter_pool = ThreadPool::new(
-        WorkerType::Filter,
-        n_filter,
-        args.survey.clone(),
-        config_path,
-        None,
-    );
+    let (mut alert_pools, mut enrichment_pools, mut filter_pools) = if args.survey == Survey::Argus
+    {
+        (
+            lane_pools(
+                WorkerType::Alert,
+                n_alert,
+                &worker_config.alert.lanes,
+                &config_path,
+            ),
+            lane_pools(
+                WorkerType::Enrichment,
+                n_enrichment,
+                &worker_config.enrichment.lanes,
+                &config_path,
+            ),
+            lane_pools(
+                WorkerType::Filter,
+                n_filter,
+                &worker_config.filter.lanes,
+                &config_path,
+            ),
+        )
+    } else {
+        (
+            vec![ThreadPool::new(
+                WorkerType::Alert,
+                n_alert,
+                args.survey.clone(),
+                config_path.clone(),
+                None,
+            )],
+            vec![ThreadPool::new(
+                WorkerType::Enrichment,
+                n_enrichment,
+                args.survey.clone(),
+                config_path.clone(),
+                shared_model_pool,
+            )],
+            vec![ThreadPool::new(
+                WorkerType::Filter,
+                n_filter,
+                args.survey.clone(),
+                config_path,
+                None,
+            )],
+        )
+    };
 
     // By reference, so the supervision tick below can still borrow them mutably.
-    let record_pool_metrics =
-        |survey: &Survey, alert: &ThreadPool, enrichment: &ThreadPool, filter: &ThreadPool| {
-            for (kind, pool) in [
-                ("alert", alert),
-                ("enrichment", enrichment),
-                ("filter", filter),
-            ] {
-                record_worker_pool_state(
-                    survey,
-                    kind,
-                    pool.live_worker_count(),
-                    pool.total_worker_count(),
-                );
-            }
-        };
+    let record_pool_metrics = |survey: &Survey,
+                               alert: &[ThreadPool],
+                               enrichment: &[ThreadPool],
+                               filter: &[ThreadPool]| {
+        for (kind, pools) in [
+            ("alert", alert),
+            ("enrichment", enrichment),
+            ("filter", filter),
+        ] {
+            let (live, total) = pools_counts(pools);
+            record_worker_pool_state(survey, kind, live, total);
+        }
+    };
 
     // Emit an initial sample so dashboards show running workers immediately.
-    record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
+    record_pool_metrics(&args.survey, &alert_pools, &enrichment_pools, &filter_pools);
 
     // Supervise often to respawn fast, but only log the heartbeat once a minute.
     let mut supervise_tick = tokio::time::interval(Duration::from_secs(5));
@@ -340,16 +528,25 @@ async fn run(
                 break;
             }
             _ = supervise_tick.tick() => {
-                alert_pool.supervise();
-                enrichment_pool.supervise();
-                filter_pool.supervise();
+                for pool in alert_pools
+                    .iter_mut()
+                    .chain(enrichment_pools.iter_mut())
+                    .chain(filter_pools.iter_mut())
+                {
+                    pool.supervise();
+                }
             }
             _ = heartbeat_tick.tick() => {
-                record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
+                record_pool_metrics(&args.survey, &alert_pools, &enrichment_pools, &filter_pools);
+                let counts = take_heartbeat_counts();
                 info!(
-                    alert = %pool_state(&alert_pool),
-                    enrichment = %pool_state(&enrichment_pool),
-                    filter = %pool_state(&filter_pool),
+                    alert = %pool_state(&alert_pools),
+                    enrichment = %pool_state(&enrichment_pools),
+                    filter = %pool_state(&filter_pools),
+                    processed = counts.alert,
+                    enriched = counts.enrichment,
+                    filtered = counts.filter,
+                    passed = counts.passed,
                     "heartbeat: workers running"
                 );
             }
@@ -357,9 +554,9 @@ async fn run(
     }
 
     info!("shutting down");
-    drop(alert_pool);
-    drop(enrichment_pool);
-    drop(filter_pool);
+    drop(alert_pools);
+    drop(enrichment_pools);
+    drop(filter_pools);
     if let Some(meter_provider) = meter_provider {
         if let Err(error) = meter_provider.shutdown() {
             log_error!(WARN, error, "failed to shut down the meter provider");

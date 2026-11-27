@@ -1,10 +1,11 @@
 use crate::conf::AppConfig;
 use crate::utils::cutouts::AlertCutout;
 use crate::utils::enums::Survey;
-use crate::utils::worker::WorkerCmd;
+use crate::utils::ingest_stats;
+use crate::utils::worker::{WorkerCmd, WorkerQueues};
 use crate::{
     conf,
-    scheduler::record_worker_retry,
+    scheduler::{count_processed_alert, record_worker_retry},
     utils::{
         cutouts::{CutoutStorage, CutoutStorageError},
         db::mongify,
@@ -21,9 +22,7 @@ use crate::{
 };
 
 use std::collections::HashSet;
-use std::{
-    collections::HashMap, fmt::Debug, future::Future, io::Read, sync::LazyLock, time::Instant,
-};
+use std::{collections::HashMap, fmt::Debug, future::Future, io::Read, sync::LazyLock};
 
 use apache_avro::{from_avro_datum, from_value, Schema};
 use futures::future::join_all;
@@ -38,7 +37,7 @@ use opentelemetry::{
 use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 use uuid::Uuid;
 
 const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
@@ -81,7 +80,6 @@ pub struct LightcurveJdOnly {
     pub jd: f64,
 }
 
-#[instrument(skip_all, err)]
 fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
     let mut i = 0u64;
     let mut buf = [0u8; 1];
@@ -104,8 +102,7 @@ fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> 
     Ok(i)
 }
 
-#[instrument(skip_all, err)]
-pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
+fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     let z = decode_variable(reader)?;
     if z & 0x1 == 0 {
         Ok((z >> 1) as i64)
@@ -114,13 +111,6 @@ pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     }
 }
 
-#[instrument(skip_all, err)]
-fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
-    Ok(zag_i64(reader)?)
-}
-
-/// Read a length-prefixed byte array, returning its range in the underlying slice.
-#[instrument(skip_all, err)]
 fn read_byte_range(
     cursor: &mut std::io::Cursor<&[u8]>,
 ) -> Result<std::ops::Range<usize>, SchemaRegistryError> {
@@ -266,6 +256,8 @@ pub enum AlertError {
     MissingFluxPSF,
     #[error("missing psf flux error")]
     MissingFluxPSFError,
+    #[error("non-finite psf flux")]
+    NonFiniteFluxPSF,
     #[error("missing ap flux")]
     MissingFluxAperture,
     #[error("missing ap flux error")]
@@ -282,6 +274,8 @@ pub enum AlertError {
     DarkFrame,
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
+    #[error("invalid diffmaglim value: {0}")]
+    InvalidDiffmaglim(f32),
     #[error("cutout storage error")]
     CutoutStorageError(#[from] CutoutStorageError),
     #[error("invalid timeseries input: {0}")]
@@ -649,6 +643,37 @@ fn to_bits_normalized(jd: f64) -> u64 {
         bits = f64::NAN.to_bits(); // Normalize all NaNs to a single representation
     }
     bits
+}
+
+pub async fn nearest_match(
+    ra: f64,
+    dec: f64,
+    dec_range: (f64, f64),
+    radius_rad: f64,
+    collection: &Collection<Document>,
+) -> Result<Vec<String>, AlertError> {
+    if !(dec >= dec_range.0 && dec <= dec_range.1) {
+        return Ok(vec![]);
+    }
+    let result = collection
+        .find_one(doc! {
+            "coordinates.radec_geojson": {
+                "$nearSphere": [ra - 180.0, dec],
+                "$maxDistance": radius_rad,
+            },
+        })
+        .projection(doc! {
+            "_id": 1
+        })
+        .await;
+    match result {
+        Ok(Some(doc)) => Ok(vec![doc.get_str("_id")?.to_string()]),
+        Ok(None) => Ok(vec![]),
+        Err(e) => {
+            error!("Error cross-matching with {}: {}", collection.name(), e);
+            Ok(vec![])
+        }
+    }
 }
 
 pub trait TimeSeries {
@@ -1082,6 +1107,21 @@ pub trait AlertWorker {
             })?;
         Ok(())
     }
+    #[instrument(skip(self, alert_collection), err)]
+    async fn check_alert_exists<T>(
+        &self,
+        candid: i64,
+        alert_collection: &Collection<T>,
+    ) -> Result<bool, AlertError>
+    where
+        T: Send + Sync + Serialize,
+    {
+        let alert_exists = alert_collection
+            .count_documents(doc! { "_id": candid })
+            .await?
+            > 0;
+        Ok(alert_exists)
+    }
     #[instrument(skip(self, alert_aux_collection), err)]
     async fn check_alert_aux_exists<T>(
         &self,
@@ -1115,7 +1155,7 @@ pub trait AlertWorker {
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
         cutout_storage: &CutoutStorage,
-    ) -> Result<ProcessAlertStatus, AlertError> {
+    ) -> Result<(), AlertError> {
         let cutouts = AlertCutout {
             candid: candid,
             cutout_science,
@@ -1123,10 +1163,7 @@ pub trait AlertWorker {
             cutout_difference,
         };
         match cutout_storage.insert_cutouts(cutouts).await {
-            Ok(_) => Ok(ProcessAlertStatus::Added(candid)),
-            Err(CutoutStorageError::CutoutAlreadyExists(_)) => {
-                Ok(ProcessAlertStatus::Exists(candid))
-            }
+            Ok(_) | Err(CutoutStorageError::CutoutAlreadyExists(_)) => Ok(()),
             Err(e) => Err(AlertError::from(e)),
         }
     }
@@ -1139,33 +1176,31 @@ pub trait AlertWorker {
         radius_rad: f64,
         collection: &Collection<Document>,
     ) -> Result<Vec<String>, AlertError> {
-        let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
-            let result = collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": radius_rad,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await;
-            match result {
-                Ok(Some(doc)) => {
-                    let object_id = doc.get_str("_id")?;
-                    vec![object_id.to_string()]
-                }
-                Ok(None) => vec![],
-                Err(e) => {
-                    error!("Error cross-matching with {}: {}", collection.name(), e);
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-        Ok(matches)
+        nearest_match(ra, dec, dec_range, radius_rad, collection).await
+    }
+
+    #[instrument(skip(self, collection), fields(xmatch_survey = collection.name()), err)]
+    async fn link_counterpart(
+        &self,
+        collection: &Collection<Document>,
+        id: &str,
+        object_id: &str,
+        survey: &str,
+        other_survey: &str,
+    ) -> Result<(), AlertError> {
+        let alias = doc! { "$literal": [object_id] };
+        let unlinked = format!("aliases.{}.0", survey);
+        collection
+            .update_one(
+                doc! { "_id": id, unlinked: { "$exists": false } },
+                vec![doc! { "$set": { "aliases": { "$cond": [
+                    { "$eq": [{ "$type": "$aliases" }, "object"] },
+                    { "$mergeObjects": ["$aliases", { survey: &alias }] },
+                    { other_survey: [], survey: &alias },
+                ] } } }],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Update the alert auxiliary collection (object-level table) with new survey matches,
@@ -1307,18 +1342,7 @@ pub trait AlertWorker {
     async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError>;
 }
 
-#[instrument(skip_all)]
-fn report_progress(start: &Instant, stream: &Survey, count: u64, message: &str) {
-    let elapsed = start.elapsed().as_secs();
-    info!(
-        ?stream,
-        count,
-        elapsed,
-        average_rate = count as f64 / elapsed as f64,
-        "{}",
-        message,
-    );
-}
+const STATS_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub fn alert_temp_queue_name(input_queue_name: &str) -> String {
     format!("{}_temp", input_queue_name)
@@ -1449,6 +1473,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
+    queues: WorkerQueues,
 ) -> Result<(), AlertWorkerError> {
     debug!(?config_path);
     let config = AppConfig::from_path(config_path)?;
@@ -1460,21 +1485,26 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
     let mut alert_processor = T::new(config_path).await?;
 
-    let input_queue_name = alert_processor.input_queue_name();
+    let input_queue_name = queues
+        .input
+        .unwrap_or_else(|| alert_processor.input_queue_name());
     let temp_queue_name = alert_temp_queue_name(&input_queue_name);
-    let output_queue_name = alert_processor.output_queue_name();
+    let output_queue_name = queues
+        .output
+        .unwrap_or_else(|| alert_processor.output_queue_name());
 
     let con = config
         .build_redis()
         .await
         .inspect_err(as_error!("failed to create redis client"))?;
     let survey_name = survey.to_string();
+    let db = config.build_db().await?;
+    let mut stats = ingest_stats::MinuteStats::new();
+    let mut last_stats_flush = std::time::Instant::now();
 
     let command_interval: usize = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
-    let mut count = 0;
 
-    let start = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let survey_attr = KeyValue::new("survey", survey.to_string());
     let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
@@ -1509,6 +1539,10 @@ pub async fn run_alert_worker<T: AlertWorker>(
         KeyValue::new("reason", "output_queue"),
     ];
     loop {
+        if !stats.is_empty() && last_stats_flush.elapsed() >= STATS_FLUSH_INTERVAL {
+            ingest_stats::flush(&db, &survey_name, &mut stats).await;
+            last_stats_flush = std::time::Instant::now();
+        }
         // check for command from threadpool
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
@@ -1542,7 +1576,17 @@ pub async fn run_alert_worker<T: AlertWorker>(
             }
         };
 
-        let process_result = alert_processor.process_alert(&avro_bytes).await;
+        let (received_ms, payload) = ingest_stats::unwrap(&avro_bytes);
+        let process_result = alert_processor.process_alert(payload).await;
+        if let (Ok(ProcessAlertStatus::Added(candid)), Some(received_ms)) =
+            (&process_result, received_ms)
+        {
+            ingest_stats::mark_received(&con, &survey_name, *candid, received_ms).await;
+            stats
+                .entry(ingest_stats::minute_of(received_ms))
+                .or_default()
+                .received += 1;
+        }
         let mut attributes = match process_result {
             Ok(ProcessAlertStatus::Added(_)) => &ok_added_attrs,
             Ok(ProcessAlertStatus::Exists(_)) => &ok_exists_attrs,
@@ -1564,13 +1608,10 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
         ACTIVE.add(-1, &active_attrs);
         ALERT_PROCESSED.add(1, attributes);
+        count_processed_alert();
 
         handle_result?;
-        if count > 0 && count % 1000 == 0 {
-            report_progress(&start, &survey, count, "progress");
-        }
-        count += 1;
     }
-    report_progress(&start, &survey, count, "summary");
+    ingest_stats::flush(&db, &survey_name, &mut stats).await;
     Ok(())
 }

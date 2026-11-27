@@ -4,6 +4,7 @@
 //! Legacy Survey gives a Tractor half-light radius plus ellipticity components.
 //! Both end up as the same semi-axes and PA.
 
+use flare::spatial::great_circle_distance;
 use mongodb::bson::{Bson, Document};
 
 use crate::utils::spatial::get_opt_f64_from_doc as opt_f64;
@@ -23,7 +24,7 @@ fn opt_string(doc: &Document, key: &str) -> Option<String> {
 
 /// An object's catalogue name. NED names its rows with a string, Legacy with a
 /// numeric id, so both spellings have to be accepted.
-fn opt_objname(doc: &Document, key: &str) -> Option<String> {
+pub(super) fn opt_objname(doc: &Document, key: &str) -> Option<String> {
     match doc.get(key) {
         Some(Bson::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(Bson::Int64(v)) => Some(v.to_string()),
@@ -94,6 +95,7 @@ pub fn galaxy_from_ned(doc: &Document, config: &HostGalaxyConfig) -> Option<Gala
         pa_deg: opt_f64(doc, "Diam_pa").unwrap_or(0.0),
         redshift: opt_f64(doc, "z"),
         redshift_err: opt_f64(doc, "z_unc"),
+        redshift_type: ned_redshift_type(doc),
         dist_mpc: opt_f64(doc, "DistMpc"),
         dist_mpc_method: opt_string(doc, "DistMpc_method"),
         mag: opt_f64(doc, "m_Ks"),
@@ -104,6 +106,7 @@ pub fn galaxy_from_ned(doc: &Document, config: &HostGalaxyConfig) -> Option<Gala
         size_is_isophotal: true,
         diam_survey,
         orientation_is_nominal,
+        rex_snr_band: None,
     })
 }
 
@@ -119,33 +122,39 @@ const REX_TYPE: &str = "REX";
 
 /// Too small to separate from a point source, too faint to be reliably shaped,
 /// or blended enough to be a fragment of the galaxy it sits inside.
-fn rejected_as_marginal_rex(doc: &Document, config: &HostGalaxyConfig) -> bool {
+fn credible_rex_band(doc: &Document, config: &HostGalaxyConfig) -> Option<&'static str> {
     if opt_f64(doc, "shape_r").unwrap_or(0.0) < config.rex_min_shape_r_arcsec {
-        return true;
+        return None;
     }
-    // Absent columns mean no S/N was measured, which must not reject the row.
-    // A measured flux at or below zero is different: the row was looked at and
-    // found to have no positive signal, so it cannot be a host.
-    if let (Some(flux), Some(ivar)) = (opt_f64(doc, "flux_r"), opt_f64(doc, "flux_ivar_r")) {
-        if flux <= 0.0 {
-            return true;
-        }
-        if ivar > 0.0 && flux * ivar.sqrt() < config.rex_min_snr {
-            return true;
-        }
+    let (band, snr) = rex_snr_band(doc)?;
+    if snr <= 0.0 || snr < config.rex_min_snr {
+        return None;
     }
-    opt_f64(doc, "fracflux_r").is_some_and(|f| f > config.rex_max_fracflux)
+    if opt_f64(doc, &format!("fracflux_{band}")).is_some_and(|f| f > config.rex_max_fracflux) {
+        return None;
+    }
+    Some(band)
 }
 
-fn isophotal_semi_major_for(
-    doc: &Document,
-    ellipse: &Ellipse,
-    config: &HostGalaxyConfig,
-) -> Option<f64> {
+fn rex_snr_band(doc: &Document) -> Option<(&'static str, f64)> {
+    band_snr(doc, "r").map(|snr| ("r", snr)).or_else(|| {
+        ["g", "i", "z"]
+            .into_iter()
+            .filter_map(|band| band_snr(doc, band).map(|snr| (band, snr)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    })
+}
+
+fn band_snr(doc: &Document, band: &str) -> Option<f64> {
+    let ivar = opt_f64(doc, &format!("flux_ivar_{band}")).filter(|v| *v > 0.0)?;
+    Some(opt_f64(doc, &format!("flux_{band}"))? * ivar.sqrt())
+}
+
+fn sersic_profile(doc: &Document) -> Option<(f64, f64)> {
     let objtype = opt_string(doc, "objtype")?;
     let n = sersic_index_for_type(&objtype, opt_f64(doc, "sersic"))?;
     let m_tot = total_mag(opt_f64(doc, "flux_r")?)?;
-    isophotal_semi_major(ellipse.a, ellipse.axis_ratio, n, m_tot, config.isophote_mag)
+    Some((n, m_tot))
 }
 
 /// A Legacy redshift column, or `None` where it holds the -99 that means absent.
@@ -153,7 +162,11 @@ fn legacy_redshift(doc: &Document, key: &str) -> Option<f64> {
     opt_f64(doc, key).filter(|z| *z > -0.5)
 }
 
-pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<GalaxyCandidate> {
+pub fn galaxy_from_legacy(
+    doc: &Document,
+    catalog: &str,
+    config: &HostGalaxyConfig,
+) -> Option<GalaxyCandidate> {
     let ra = opt_f64(doc, "ra")?;
     let dec = opt_f64(doc, "dec")?;
 
@@ -174,17 +187,21 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
     let shape_e1 = opt_f64(doc, "shape_e1").unwrap_or(0.0);
     let shape_e2 = opt_f64(doc, "shape_e2").unwrap_or(0.0);
 
-    if objtype.as_deref() == Some(REX_TYPE) && rejected_as_marginal_rex(doc, config) {
-        return None;
-    }
+    let rex_snr_band = match objtype.as_deref() {
+        Some(REX_TYPE) => Some(credible_rex_band(doc, config)?.to_string()),
+        _ => None,
+    };
 
     let mut ellipse =
         Ellipse::from_tractor(shape_r, shape_e1, shape_e2, config.min_axis_arcsec).ok()?;
-    bounded_axis_ratio(ellipse.axis_ratio, config)?;
+    ellipse.axis_ratio = bounded_axis_ratio(ellipse.axis_ratio, config)?;
+    ellipse.b = ellipse.a * ellipse.axis_ratio;
 
     // A row that cannot be rescaled keeps R_e, undersized against NED-LVS D25.
-    let size_is_isophotal = match isophotal_semi_major_for(doc, &ellipse, config) {
-        Some(a25) => {
+    let size_is_isophotal = match sersic_profile(doc) {
+        Some((n, m_tot)) => {
+            let a25 =
+                isophotal_semi_major(ellipse.a, ellipse.axis_ratio, n, m_tot, config.isophote_mag)?;
             ellipse = ellipse.scaled_to_semi_major(a25, config.min_axis_arcsec);
             true
         }
@@ -192,12 +209,16 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
     };
 
     // Spectroscopic where Legacy has one; its error is negligible beside a photo-z.
-    let (redshift, redshift_err) = match legacy_redshift(doc, "z_spec") {
-        Some(z) => (Some(z), None),
-        None => (
-            legacy_redshift(doc, "z_phot_median"),
-            legacy_redshift(doc, "z_phot_std"),
-        ),
+    let (redshift, redshift_err, redshift_type) = match legacy_redshift(doc, "z_spec") {
+        Some(z) => (Some(z), None, Some(SPECTROSCOPIC)),
+        None => {
+            let z = legacy_redshift(doc, "z_phot_median");
+            (
+                z,
+                legacy_redshift(doc, "z_phot_std"),
+                z.map(|_| PHOTOMETRIC),
+            )
+        }
     };
 
     Some(GalaxyCandidate {
@@ -208,27 +229,165 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
         pa_deg: ellipse.pa_rad.to_degrees(),
         redshift,
         redshift_err,
+        redshift_type: redshift_type.map(String::from),
         dist_mpc: None,
         dist_mpc_method: None,
         mag: None,
         mag_err: None,
         objtype,
         objname: opt_objname(doc, "_id"),
-        catalog: Some(LS_DR10.to_string()),
+        catalog: Some(catalog.to_string()),
         size_is_isophotal,
         diam_survey: None,
         orientation_is_nominal: false,
+        rex_snr_band,
     })
 }
 
 pub const NED: &str = "NED";
+pub(super) const SPECTROSCOPIC: &str = "spectroscopic";
+pub(super) const PHOTOMETRIC: &str = "photometric";
 pub const LS_DR10: &str = "LSDR10";
+pub const LS_DR9: &str = "LSDR9";
+
+/// DR9 north only covers sky DR10 does not reach.
+pub(super) fn legacy_rows<'a>(
+    xmatches: &'a std::collections::HashMap<String, Vec<Document>>,
+    config: &'a HostGalaxyConfig,
+) -> Option<(&'a str, &'a [Document])> {
+    [&config.ls_dr10_catalog, &config.ls_dr9_catalog]
+        .into_iter()
+        .find_map(|catalog| {
+            xmatches
+                .get(catalog)
+                .filter(|rows| !rows.is_empty())
+                .map(|rows| (catalog.as_str(), rows.as_slice()))
+        })
+}
 
 /// NED-LVS comes first, for its curated diameters and redshift-independent
 /// distances. Legacy Survey shreds large galaxies into many rows, each of which
 /// would split the posterior among fragments of one galaxy, so a Legacy row
-/// inside an accepted NED-LVS galaxy (d_DLR <= 1) is dropped.
+/// inside an accepted NED-LVS galaxy (d_DLR <= 1) is dropped. A DESI spectrum on
+/// a galaxy's centre then replaces its missing or photometric redshift, and
+/// failing that a NED spectroscopic redshift there, even from a row with no
+/// diameter or of an excluded type.
 pub fn collect_galaxies(
+    xmatches: &std::collections::HashMap<String, Vec<Document>>,
+    config: &HostGalaxyConfig,
+) -> Vec<GalaxyCandidate> {
+    let mut galaxies = shaped_galaxies(xmatches, config);
+    let spectra = xmatches.get(&config.desi_catalog);
+    let ned = xmatches.get(&config.ned_catalog);
+    for galaxy in galaxies.iter_mut() {
+        if let Some(spectra) = spectra {
+            add_spectroscopic_redshift(galaxy, spectra, config);
+        }
+        if let Some(ned) = ned {
+            add_ned_redshift(galaxy, ned, config);
+        }
+    }
+    galaxies
+}
+
+fn is_good_galaxy_spectrum(doc: &Document) -> bool {
+    let zwarn = match doc.get("zwarn") {
+        Some(Bson::Int64(v)) => *v,
+        Some(Bson::Int32(v)) => *v as i64,
+        _ => return false,
+    };
+    zwarn == 0
+        && opt_string(doc, "spectype").as_deref() == Some("GALAXY")
+        && opt_f64(doc, "z").is_some_and(|z| z > 0.0)
+}
+
+pub(super) fn lacks_spectroscopic_redshift(
+    redshift: Option<f64>,
+    redshift_type: Option<&str>,
+) -> bool {
+    redshift.is_none() || redshift_type != Some(SPECTROSCOPIC)
+}
+
+fn ned_redshift_type(doc: &Document) -> Option<String> {
+    match opt_string(doc, "z_tech").as_deref() {
+        Some("SPEC") => Some(SPECTROSCOPIC.to_string()),
+        Some("PHOT") => Some(PHOTOMETRIC.to_string()),
+        _ => None,
+    }
+}
+
+fn is_ned_spectroscopic(doc: &Document) -> bool {
+    opt_string(doc, "z_tech").as_deref() == Some("SPEC")
+        && opt_f64(doc, "z").is_some_and(|z| z > 0.0)
+}
+
+fn nearest_where(
+    docs: &[Document],
+    ra: f64,
+    dec: f64,
+    max_arcsec: f64,
+    keep: impl Fn(&Document) -> bool,
+) -> Option<&Document> {
+    docs.iter()
+        .filter(|doc| keep(doc))
+        .filter_map(|doc| {
+            let sep =
+                great_circle_distance(ra, dec, opt_f64(doc, "ra")?, opt_f64(doc, "dec")?) * 3600.0;
+            (sep <= max_arcsec).then_some((doc, sep))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(doc, _)| doc)
+}
+
+pub(super) fn nearest_galaxy_spectrum(
+    spectra: &[Document],
+    ra: f64,
+    dec: f64,
+    max_arcsec: f64,
+) -> Option<&Document> {
+    nearest_where(spectra, ra, dec, max_arcsec, is_good_galaxy_spectrum)
+}
+
+pub(super) fn add_spectroscopic_redshift(
+    galaxy: &mut GalaxyCandidate,
+    spectra: &[Document],
+    config: &HostGalaxyConfig,
+) {
+    if !lacks_spectroscopic_redshift(galaxy.redshift, galaxy.redshift_type.as_deref()) {
+        return;
+    }
+    let spectrum =
+        nearest_galaxy_spectrum(spectra, galaxy.ra, galaxy.dec, config.spectrum_match_arcsec);
+    if let Some(doc) = spectrum {
+        galaxy.redshift = opt_f64(doc, "z");
+        galaxy.redshift_err = opt_f64(doc, "zerr");
+        galaxy.redshift_type = Some(SPECTROSCOPIC.to_string());
+    }
+}
+
+fn add_ned_redshift(galaxy: &mut GalaxyCandidate, ned: &[Document], config: &HostGalaxyConfig) {
+    if !lacks_spectroscopic_redshift(galaxy.redshift, galaxy.redshift_type.as_deref()) {
+        return;
+    }
+    let Some(doc) = nearest_where(
+        ned,
+        galaxy.ra,
+        galaxy.dec,
+        config.spectrum_match_arcsec,
+        is_ned_spectroscopic,
+    ) else {
+        return;
+    };
+    galaxy.redshift = opt_f64(doc, "z");
+    galaxy.redshift_err = opt_f64(doc, "z_unc");
+    galaxy.redshift_type = Some(SPECTROSCOPIC.to_string());
+    if galaxy.dist_mpc.is_none() {
+        galaxy.dist_mpc = opt_f64(doc, "DistMpc");
+        galaxy.dist_mpc_method = opt_string(doc, "DistMpc_method");
+    }
+}
+
+fn shaped_galaxies(
     xmatches: &std::collections::HashMap<String, Vec<Document>>,
     config: &HostGalaxyConfig,
 ) -> Vec<GalaxyCandidate> {
@@ -241,7 +400,7 @@ pub fn collect_galaxies(
         })
         .unwrap_or_default();
 
-    let Some(ls_docs) = xmatches.get(&config.ls_dr10_catalog) else {
+    let Some((ls_catalog, ls_docs)) = legacy_rows(xmatches, config) else {
         return galaxies;
     };
 
@@ -255,7 +414,7 @@ pub fn collect_galaxies(
         .collect();
 
     for doc in ls_docs {
-        let Some(candidate) = galaxy_from_ls_dr10(doc, config) else {
+        let Some(candidate) = galaxy_from_legacy(doc, ls_catalog, config) else {
             continue;
         };
         let is_fragment = ned_ellipses.iter().any(|(ra, dec, ellipse)| {
@@ -283,8 +442,9 @@ mod tests {
             "flux_r": 100.0,
             "flux_ivar_r": 100.0,
         };
-        assert!(
-            !rejected_as_marginal_rex(&usable, &config),
+        assert_eq!(
+            credible_rex_band(&usable, &config),
+            Some("r"),
             "a bright, well-measured REX should survive"
         );
 
@@ -292,14 +452,13 @@ mod tests {
             let mut doc = usable.clone();
             doc.insert("flux_r", flux);
             assert!(
-                rejected_as_marginal_rex(&doc, &config),
+                credible_rex_band(&doc, &config).is_none(),
                 "flux_r {flux} was accepted"
             );
         }
 
-        // An absent measurement still must not reject the row.
         let unmeasured = doc! { "shape_r": config.rex_min_shape_r_arcsec + 1.0 };
-        assert!(!rejected_as_marginal_rex(&unmeasured, &config));
+        assert!(credible_rex_band(&unmeasured, &config).is_none());
     }
 
     #[test]
@@ -419,8 +578,12 @@ mod tests {
 
     #[test]
     fn test_from_ls_dr10_uses_tractor_shape() {
-        let g =
-            galaxy_from_ls_dr10(&ls_doc("ls-1", 10.0, 20.0), &HostGalaxyConfig::default()).unwrap();
+        let g = galaxy_from_legacy(
+            &ls_doc("ls-1", 10.0, 20.0),
+            LS_DR10,
+            &HostGalaxyConfig::default(),
+        )
+        .unwrap();
         assert_close!(g.a_arcsec, 1.5);
         assert_close!(g.b_arcsec, 1.5 * (0.8 / 1.2), epsilon = 1e-9);
         assert_eq!(g.catalog.as_deref(), Some(LS_DR10));
@@ -431,13 +594,13 @@ mod tests {
         let config = HostGalaxyConfig::default();
         let mut d = ls_doc("ls-1", 10.0, 20.0);
         d.insert("objtype", "PSF");
-        assert!(galaxy_from_ls_dr10(&d, &config).is_none());
+        assert!(galaxy_from_legacy(&d, LS_DR10, &config).is_none());
 
         let config = HostGalaxyConfig {
             exclude_star_like: false,
             ..Default::default()
         };
-        assert!(galaxy_from_ls_dr10(&d, &config).is_some());
+        assert!(galaxy_from_legacy(&d, LS_DR10, &config).is_some());
     }
 
     #[test]
@@ -445,7 +608,7 @@ mod tests {
         let config = HostGalaxyConfig::default();
         let mut d = ls_doc("ls-1", 10.0, 20.0);
         d.insert("shape_r", Bson::Null);
-        assert!(galaxy_from_ls_dr10(&d, &config).is_none());
+        assert!(galaxy_from_legacy(&d, LS_DR10, &config).is_none());
     }
 
     #[test]
@@ -604,6 +767,7 @@ mod projection_tests {
             "enabled",
             "ned_catalog",
             "ls_dr10_catalog",
+            "ls_dr9_catalog",
             "max_dlr",
             "min_axis_arcsec",
             "max_candidates",
@@ -613,6 +777,8 @@ mod projection_tests {
             "rex_min_snr",
             "rex_max_fracflux",
             "isophote_mag",
+            "ps1_catalog",
+            "photometry_match_arcsec",
         ];
         for (name, config) in deployment_configs() {
             let Some(block) = config.split("\nhost_galaxy:").nth(1) else {
@@ -659,7 +825,7 @@ mod legacy_shape_tests {
     }
 
     fn accepted(doc: &Document) -> bool {
-        galaxy_from_ls_dr10(doc, &HostGalaxyConfig::default()).is_some()
+        galaxy_from_legacy(doc, LS_DR10, &HostGalaxyConfig::default()).is_some()
     }
 
     #[test]
@@ -691,20 +857,20 @@ mod legacy_shape_tests {
     }
 
     #[test]
-    fn test_rex_without_a_signal_to_noise_measurement_is_still_judged_on_size() {
-        for key in ["flux_r", "flux_ivar_r"] {
-            let mut d = good_rex();
-            d.remove(key);
-            assert!(
-                accepted(&d),
-                "REX missing {key} has no S/N to judge, so size and blending decide"
-            );
-        }
+    fn test_rex_without_r_is_judged_in_its_best_other_band() {
+        let mut d = good_rex();
+        d.insert("flux_ivar_r", 0.0_f64);
+        assert!(!accepted(&d), "a REX observed in no band is dropped");
 
-        let mut small = good_rex();
-        small.remove("flux_ivar_r");
-        small.insert("shape_r", 0.05_f64);
-        assert!(!accepted(&small), "an unmeasurable REX is still too small");
+        d.insert("flux_g", 3.0_f64);
+        d.insert("flux_ivar_g", 1.0_f64);
+        d.insert("flux_z", 50.0_f64);
+        d.insert("flux_ivar_z", 1.0_f64);
+        let g = galaxy_from_legacy(&d, LS_DR10, &HostGalaxyConfig::default()).expect("kept on z");
+        assert_eq!(g.rex_snr_band.as_deref(), Some("z"));
+
+        d.insert("fracflux_z", 0.9_f64);
+        assert!(!accepted(&d), "blending is judged in the S/N band");
     }
 
     #[test]
@@ -723,7 +889,7 @@ mod legacy_shape_tests {
         let mut d = good_rex();
         d.insert("shape_r", 2.0_f64);
         d.insert("flux_r", 1000.0_f64); // ~15 mag, comfortably above the isophote
-        let g = galaxy_from_ls_dr10(&d, &HostGalaxyConfig::default()).expect("kept");
+        let g = galaxy_from_legacy(&d, LS_DR10, &HostGalaxyConfig::default()).expect("kept");
         assert!(
             g.a_arcsec > 2.0,
             "semi-major {} should exceed R_e = 2 after conversion",
@@ -736,7 +902,7 @@ mod legacy_shape_tests {
         let mut d = good_rex();
         d.insert("objtype", "EXP");
         d.remove("flux_r");
-        let g = galaxy_from_ls_dr10(&d, &HostGalaxyConfig::default()).expect("kept");
+        let g = galaxy_from_legacy(&d, LS_DR10, &HostGalaxyConfig::default()).expect("kept");
         assert!((g.a_arcsec - 1.2).abs() < 1e-9, "got {}", g.a_arcsec);
     }
 
@@ -749,8 +915,9 @@ mod legacy_shape_tests {
         let mut unconverted = d.clone();
         unconverted.remove("flux_r");
 
-        let converted = galaxy_from_ls_dr10(&d, &HostGalaxyConfig::default()).unwrap();
-        let plain = galaxy_from_ls_dr10(&unconverted, &HostGalaxyConfig::default()).unwrap();
+        let converted = galaxy_from_legacy(&d, LS_DR10, &HostGalaxyConfig::default()).unwrap();
+        let plain =
+            galaxy_from_legacy(&unconverted, LS_DR10, &HostGalaxyConfig::default()).unwrap();
         let q_converted = converted.b_arcsec / converted.a_arcsec;
         let q_plain = plain.b_arcsec / plain.a_arcsec;
         assert!(
@@ -825,7 +992,7 @@ mod review_tests {
                 "shape_r": 2.0, "shape_e1": 0.1, "shape_e2": 0.0, "flux_r": 100.0,
             };
             assert!(
-                galaxy_from_ls_dr10(&d, &config).is_none(),
+                galaxy_from_legacy(&d, LS_DR10, &config).is_none(),
                 "{objtype} has no galaxy extent"
             );
         }
@@ -838,19 +1005,19 @@ mod review_tests {
             "_id": "x", "ra": 10.0, "dec": 20.0, "objtype": "EXP",
             "shape_r": 2.0, "shape_e1": 0.1, "shape_e2": 0.0, "flux_r": 100.0,
         };
-        let converted = galaxy_from_ls_dr10(&base, &config).expect("converted");
+        let converted = galaxy_from_legacy(&base, LS_DR10, &config).expect("converted");
         assert!(converted.size_is_isophotal);
 
         // No flux, so no total magnitude, so no isophote.
         let mut no_flux = base.clone();
         no_flux.remove("flux_r");
-        let fallback = galaxy_from_ls_dr10(&no_flux, &config).expect("still a candidate");
+        let fallback = galaxy_from_legacy(&no_flux, LS_DR10, &config).expect("still a candidate");
         assert!(!fallback.size_is_isophotal);
 
         // A SER row without a Sersic index falls back to its half-light radius.
         let mut ser = base.clone();
         ser.insert("objtype", "SER");
-        let ser = galaxy_from_ls_dr10(&ser, &config).expect("ser");
+        let ser = galaxy_from_legacy(&ser, LS_DR10, &config).expect("ser");
         assert!(!ser.size_is_isophotal);
     }
 }

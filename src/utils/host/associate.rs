@@ -158,6 +158,7 @@ mod tests {
             pa_deg: pa,
             redshift: None,
             redshift_err: None,
+            redshift_type: None,
             dist_mpc: None,
             dist_mpc_method: None,
             mag: None,
@@ -168,6 +169,7 @@ mod tests {
             size_is_isophotal: true,
             diam_survey: None,
             orientation_is_nominal: false,
+            rex_snr_band: None,
         }
     }
 

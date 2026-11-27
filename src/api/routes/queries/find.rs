@@ -1,15 +1,18 @@
 /// Endpoints for executing analytical queries.
-use crate::api::catalogs::catalog_accessible;
-use crate::api::filters::parse_filter;
-use crate::api::models::response;
-use crate::api::routes::users::User;
-
-use crate::utils::mpcorb::{
-    fetch_orbits, fill_geometry, normalize_ztf_ssnamenr, GEOMETRY_FIELDS, ORBITS_COLLECTION,
+use crate::{
+    api::{
+        catalogs::catalog_accessible, filters::parse_filter, models::response, routes::users::User,
+    },
+    conf::AppConfig,
+    utils::mpcorb::{
+        fetch_orbits, fill_geometry, normalize_ztf_ssnamenr, GEOMETRY_FIELDS, ORBITS_COLLECTION,
+    },
 };
 
+use crate::api::limits::{
+    large_query_slot, next_result, too_large, ResultError, DEFAULT_QUERY_MAX_TIME,
+};
 use actix_web::{post, web, HttpResponse};
-use futures::StreamExt;
 use mongodb::{
     bson::{doc, Bson, Document},
     Database,
@@ -56,9 +59,11 @@ impl FindQuery {
                 }
             }
         }
-        if let Some(max_time_ms) = self.max_time_ms {
-            options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
-        }
+        options.max_time = Some(
+            self.max_time_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(DEFAULT_QUERY_MAX_TIME),
+        );
         Ok(options)
     }
 }
@@ -80,13 +85,18 @@ pub async fn post_find_query(
     db: web::Data<Database>,
     body: web::Json<FindQuery>,
     current_user: Option<web::ReqData<User>>,
+    config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
     };
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let catalog_name = body.catalog_name.trim();
-    if !catalog_accessible(&db, catalog_name, Some(&current_user)).await {
+    if !catalog_accessible(&db, catalog_name, &current_user, &config).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
     let collection_name = catalog_name.to_string();
@@ -111,10 +121,13 @@ pub async fn post_find_query(
         Err(e) => return super::query_error(e, "Error finding documents"),
     };
     let mut docs = Vec::new();
-    while let Some(result) = cursor.next().await {
-        match result {
-            Ok(doc) => docs.push(doc),
-            Err(e) => {
+    let mut bytes_read = 0;
+    loop {
+        match next_result(&mut cursor, &mut bytes_read).await {
+            Ok(Some(doc)) => docs.push(doc),
+            Ok(None) => break,
+            Err(ResultError::TooLarge) => return too_large(),
+            Err(ResultError::Database(e)) => {
                 tracing::error!("Error retrieving document from the database: {}", e);
                 return super::query_error(e, "Error retrieving documents");
             }

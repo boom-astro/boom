@@ -47,34 +47,6 @@ jobs:
         id: buildx
         uses: docker/setup-buildx-action@v3
 
-      # Persist the Dockerfile's cargo cache mounts (target/, registry, git)
-      # across runs. The BuildKit cache mounts only live on the builder, which
-      # is fresh each run, so we round-trip them through actions/cache:
-      # actions/cache restores the dirs, cache-dance injects them into BuildKit
-      # before the build, then extracts them back out afterwards (its post step
-      # runs before the actions/cache save). Keyed per-arch and per-lockfile.
-      - name: Restore cargo build cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            cache-mount/target
-            cache-mount/registry
-            cache-mount/git
-          key: buildkit-cargo-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            buildkit-cargo-${{ matrix.arch }}-
-
-      - name: Inject cargo cache into BuildKit
-        uses: reproducible-containers/buildkit-cache-dance@v3.1.2
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          cache-map: |
-            {
-              "cache-mount/target": "/app/target",
-              "cache-mount/registry": "/usr/local/cargo/registry",
-              "cache-mount/git": "/usr/local/cargo/git"
-            }
-
       - name: Extract metadata (labels) for image
         id: meta
         uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7

@@ -41,6 +41,12 @@ kafka:
     winter:
       server: "localhost:9092"
       group_id: "test" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
+    askap:
+      server: "localhost:9092"
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__ASKAP__GROUP_ID environment variable
+    roman:
+      server: "localhost:9092"
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__ROMAN__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
 cutouts_storage:
@@ -53,6 +59,10 @@ cutouts_storage:
   username: mongoadmin
   password: mongoadminsecret
   srv: false
+milvus:
+  # A test-only collection, so no test run can touch the one production searches.
+  collection:
+    name: boom_ztf_fusion_embeddings_test
 workers:
   ztf:
     command_interval: 500
@@ -88,6 +98,30 @@ workers:
       max_match_rate: 5
       reference_night:
   winter:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
+      reference_window_days: 30
+  askap:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
+      reference_window_days: 30
+  roman:
     command_interval: 500
     alert:
       n_workers: 1
@@ -175,3 +209,5 @@ crossmatch:
       max_results: 3
   decam: {}
   winter: {}
+  askap: {}
+  roman: {}

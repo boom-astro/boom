@@ -1,0 +1,79 @@
+{
+  "type": "record",
+  "namespace": "argus",
+  "name": "alert",
+  "doc": "Argus alert envelope, schema version 3.0. Exactly one of eventAssociation / ssoAssociation is non-null.",
+  "version": "3.0",
+  "fields": [
+    {
+      "name": "schemaVersion",
+      "type": "string",
+      "doc": "Schema version (must be '3.0')."
+    },
+    {
+      "name": "alertOrigin",
+      "type": "string",
+      "doc": "Creator of the alert packet."
+    },
+    {
+      "name": "alertCadence",
+      "type": "int",
+      "doc": "Observation/Co-addition cadence of the candidate (seconds)."
+    },
+    {
+      "name": "alertId",
+      "type": "string",
+      "doc": "Unique alert identifier, HEALPix-derived for clean self-association (ADR-0027)."
+    },
+    {
+      "name": "candidate",
+      "type": "argus.alert.candidate",
+      "doc": "Candidate record triggering this alert."
+    },
+    {
+      "name": "eventAssociation",
+      "type": [
+        "null",
+        "argus.alert.eventAssociation"
+      ],
+      "doc": "Contains metadata and (depending on cadence) photometric history of the event associated with this candidate. Null if associated with a SSO.",
+      "default": null
+    },
+    {
+      "name": "ssoAssociation",
+      "type": [
+        "null",
+        "argus.alert.ssoAssociation"
+      ],
+      "doc": "Contains metadata and (depending on cadence) photometric history of the SSO associated with this candidate. Null if associated with an event.",
+      "default": null
+    },
+    {
+      "name": "cutoutScience",
+      "type": [
+        "null",
+        "bytes"
+      ],
+      "doc": "Optional inline science cutout.",
+      "default": null
+    },
+    {
+      "name": "cutoutTemplate",
+      "type": [
+        "null",
+        "bytes"
+      ],
+      "doc": "Optional inline template/reference cutout.",
+      "default": null
+    },
+    {
+      "name": "cutoutDifference",
+      "type": [
+        "null",
+        "bytes"
+      ],
+      "doc": "Optional inline difference cutout.",
+      "default": null
+    }
+  ]
+}

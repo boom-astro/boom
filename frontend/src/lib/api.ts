@@ -18,6 +18,10 @@ export type Profile = {
   /** Provider slugs the account can sign in with, e.g. ["google", "orcid"] */
   identity_providers?: string[];
   orcid_id?: string | null;
+  /** Whether this account may reach the admin page. Server-enforced on every
+   * admin route regardless; this only decides what the UI offers. */
+  is_admin?: boolean;
+  acls?: string[];
 } | null;
 
 export type OAuthProvider = { id: string; name: string; start_url: string };
@@ -30,16 +34,20 @@ export type TokenResponse = { id: string; name: string; access_token: string; cr
 export const TOKEN_KEY = "api_token";
 export const USERNAME_KEY = "api_user";
 
-async function parseResponseJson(res: Response): Promise<unknown> {
-  const text = await res.text();
+/** Parse a body that has already been read, throwing if it is not JSON. */
+export function parseJsonText(text: string): unknown {
   // Quote 16+ digit integers: `JSON.parse` would round them and lose candid precision.
   const safeText = text.replace(/:\s*(-?\d{16,})(?![\d]*["])/g, (_, numStr) => `:"${numStr}"`);
   return JSON.parse(safeText);
 }
 
+export async function parseResponseJson(res: Response): Promise<unknown> {
+  return parseJsonText(await res.text());
+}
+
 type DataEnvelope<T> = { data?: T };
 
-function unwrapData<T>(body: unknown, fallback: T): T {
+export function unwrapData<T>(body: unknown, fallback: T): T {
   if (body && typeof body === "object" && "data" in body) {
     const dataVal = (body as DataEnvelope<unknown>).data;
     if (dataVal !== undefined) return dataVal as T;
@@ -50,7 +58,13 @@ function unwrapData<T>(body: unknown, fallback: T): T {
 async function ensureOk(res: Response, action: string): Promise<void> {
   if (res.ok) return;
   const text = await res.text().catch(() => "");
-  throw new Error(`${action} failed: ${res.status} ${text}`);
+  let body: unknown = null;
+  try {
+    body = parseJsonText(text);
+  } catch {
+    // Not JSON.
+  }
+  throw new Error(messageOf(body) ?? `${action} failed: ${res.status} ${text}`);
 }
 
 async function readJson(res: Response): Promise<unknown> {
@@ -94,9 +108,42 @@ function saveToken(body: TokenBody) {
   localStorage.setItem(TOKEN_KEY, JSON.stringify(rec));
 }
 
+/**
+ * An authentication failure, as opposed to a request that merely failed.
+ *
+ * The difference decides whether the user gets signed out, so it has to be a
+ * type rather than a message a caller matches on: a transient 500 and an
+ * expired token both arrive at a caller as a rejected promise, and treating
+ * them the same means a blip on one request signs somebody out mid-page.
+ */
+export class UnauthorizedError extends Error {
+  constructor(message = "Unauthorized") {
+    super(message);
+    this.name = "UnauthorizedError";
+  }
+}
+
+/** Notified whenever the stored credential is dropped. */
+let onLogout: (() => void) | null = null;
+
+/**
+ * Register what else to tear down when the token goes.
+ *
+ * The token is only half of a session -- the rest is the profile the store
+ * keeps, which is persisted to localStorage and so outlives the token. Clearing
+ * the token alone leaves a page that was gated on that profile fully rendered
+ * and quietly broken, every request on it failing before it reaches the
+ * network. The store registers itself here rather than being imported, because
+ * it imports this module.
+ */
+export function setLogoutHandler(handler: (() => void) | null) {
+  onLogout = handler;
+}
+
 export function logout() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USERNAME_KEY);
+  onLogout?.();
 }
 
 export function getTokenRecord(): TokenRecord | null {
@@ -124,10 +171,43 @@ export async function login(email: string, password: string): Promise<TokenRecor
   return getTokenRecord();
 }
 
+/**
+ * The providers could not be asked for, as distinct from there being none.
+ *
+ * Only this is worth retrying. A usable answer is final, including an empty
+ * one: that is a deployment that configured no provider.
+ */
+export class OAuthProvidersUnavailable extends Error {}
+
 export async function fetchOAuthProviders(): Promise<OAuthProvider[]> {
-  const res = await fetch(`${API_BASE}/oauth/providers`);
-  if (!res.ok) return [];
-  return readList<OAuthProvider>(res);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/oauth/providers`);
+  } catch {
+    throw new OAuthProvidersUnavailable("the API could not be reached");
+  }
+  if (!res.ok) {
+    throw new OAuthProvidersUnavailable(`the API answered ${res.status}`);
+  }
+  let text: string;
+  try {
+    text = await res.text();
+  } catch {
+    // The headers arrived and the body did not. A connection dropped
+    // mid-response is the same transport failure as never reaching the API,
+    // so it must not read as "this deployment has no providers".
+    throw new OAuthProvidersUnavailable("the response body could not be read");
+  }
+  let body: unknown;
+  try {
+    body = parseJsonText(text);
+  } catch {
+    // Read in full and not JSON: the API disagreeing with us rather than a
+    // blip, which retrying cannot fix. Same for a readable non-list below.
+    return [];
+  }
+  const data = unwrapData<unknown>(body, []);
+  return Array.isArray(data) ? (data as OAuthProvider[]) : [];
 }
 
 export function startOAuthLogin(provider: OAuthProvider, redirectTo?: string) {
@@ -185,15 +265,28 @@ export async function resetPassword(email: string, token: string, new_password: 
   await ensureOk(res, "Password reset");
 }
 
-async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
+const authorization = (token: TokenRecord) => `${token.token_type} ${token.access_token}`;
+
+// Exported for the admin client, which shares this request path rather than
+// carrying a second copy of the auth handling.
+export async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
-  if (!token) throw new Error("Not authenticated");
+  if (!token) {
+    // Through `logout` rather than straight to the throw: the usual way to get
+    // here is `getTokenRecord` finding an expired record and dropping it, which
+    // is a session ending and has to tear down the rest of one. Only
+    // `ensureProfileLoaded` used to notice, so a page polling directly -- the
+    // admin page does, on two timers -- kept its persisted profile and stayed
+    // rendered over a session that had already gone.
+    logout();
+    throw new UnauthorizedError("Not authenticated");
+  }
   const headers = new Headers(init.headers || {});
-  headers.set("Authorization", `${token.token_type} ${token.access_token}`);
+  headers.set("Authorization", authorization(token));
   const res = await fetch(input, { ...init, headers });
   if (res.status === 401) {
     logout();
-    throw new Error("Unauthorized");
+    throw new UnauthorizedError();
   }
   return res;
 }
@@ -293,6 +386,7 @@ export type AlertSearchParams = {
   is_near_brightstar?: boolean;
   is_stationary?: boolean;
   is_positive?: boolean;
+  max_host_dist_mpc?: number;
   limit?: number;
   skip?: number;
 };
@@ -301,6 +395,21 @@ export type Cutouts = {
   cutoutScience?: string;
   cutoutDifference?: string;
   cutoutTemplate?: string;
+};
+
+export type HostSummary = {
+  name?: string | null;
+  catalog?: string | null;
+  ra?: number;
+  dec?: number;
+  z?: number | null;
+  z_err?: number | null;
+  z_type?: 'photometric' | 'spectroscopic' | null;
+  dist_mpc?: number | null;
+  dist_mpc_method?: string | null;
+  sep_arcsec: number;
+  sep_kpc?: number | null;
+  d_dlr: number;
 };
 
 export type Alert = {
@@ -315,6 +424,10 @@ export type Alert = {
     reliability?: number;
     [key: string]: unknown;
   };
+  properties?: {
+    best_host?: HostSummary | null;
+    [key: string]: unknown;
+  } | null;
   [key: string]: unknown;
 };
 
@@ -346,22 +459,91 @@ export function fetchObjCutouts(survey: string, objectId: string): Promise<Cutou
   return fetchCutouts(survey, `objectId=${encodeURIComponent(objectId)}`);
 }
 
+export type VillarFit = {
+  candid: string | number;
+  reduced_chi2: number | null;
+  peak_mag: number | null;
+  t_peak: number | null;
+  params: Record<string, number | null>;
+};
+
+export async function fetchVillarFit(survey: string, objectId: string): Promise<VillarFit | null> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/villar-fit?objectId=${encodeURIComponent(objectId)}`;
+  const res = await fetchWithAuth(url);
+  if (res.status === 404) return null;
+  await ensureOk(res, "Fetch Villar fit");
+  return unwrapData<VillarFit | null>(await readJson(res), null);
+}
+
+/** A Hyrax model that can be run on demand against objects of a survey. */
+export type ClassificationModel = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+/** Result of running a Hyrax model on a single object, on demand. */
+export type HyraxClassification = {
+  model?: string;
+  /** Class name -> probability. The model names its own classes. */
+  classes?: Record<string, number>;
+  /** Highest-probability class. */
+  pred_class?: string;
+  /** Evidential uncertainty, 0 (well-evidenced) to 1. */
+  vacuity?: number;
+  /** Entropy of the predicted class distribution. */
+  predictive_entropy?: number;
+  /** How many photometry points the model actually used. */
+  n_events_used?: number;
+};
+
+export async function fetchClassificationModels(survey: string): Promise<ClassificationModel[]> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/classification-models`;
+  const res = await fetchWithAuth(url);
+  await ensureOk(res, "Fetching classification models");
+  return readList<ClassificationModel>(res);
+}
+
+export async function classifyObject(
+  survey: string,
+  objectId: string,
+  model: string,
+): Promise<HyraxClassification> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/objects/${encodeURIComponent(objectId)}/classify`;
+  const res = await fetchWithAuth(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  await ensureOk(res, `Running ${model}`);
+  return unwrapData<HyraxClassification>(await parseResponseJson(res), {});
+}
+
 export type NightlyStat = {
   date: string;
   ztf?: number;
   lsst?: number;
+  decam?: number;
+  winter?: number;
+  windows?: Record<string, { start: string; end: string }>;
 };
+
+function optionalAuthHeaders(): HeadersInit {
+  const token = getTokenRecord();
+  return token ? { Authorization: authorization(token) } : {};
+}
 
 export async function fetchStats(startDate: string, endDate: string, survey?: string): Promise<NightlyStat[]> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
   if (survey) params.set("survey", survey);
-  const res = await fetch(`${API_BASE}/stats/nightly?${params}`);
+  const res = await fetch(`${API_BASE}/stats/nightly?${params}`, { headers: optionalAuthHeaders() });
   await ensureOk(res, "Fetch stats");
   return readList<NightlyStat>(res);
 }
 
-export async function refreshStats(startDate: string, endDate: string): Promise<void> {
+export async function refreshStats(startDate: string, endDate: string, survey?: string): Promise<void> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  if (survey) params.set("survey", survey);
   const res = await fetchWithAuth(`${API_BASE}/stats/refresh?${params}`, { method: "POST" });
   if (res.ok) return;
   throw new Error(messageOf(await readJson(res)) ?? `Refresh stats failed: ${res.status}`);
@@ -400,9 +582,42 @@ export type CollectionStats = {
 };
 
 export async function fetchCollectionStats(): Promise<CollectionStats> {
-  const res = await fetch(`${API_BASE}/stats/collections?count=true&size=true`);
+  const res = await fetch(`${API_BASE}/stats/collections?count=true&size=true`, { headers: optionalAuthHeaders() });
   await ensureOk(res, "Fetch collection stats");
   return unwrapData<CollectionStats>(await readJson(res), { n_collections: 0, collections: [] });
+}
+
+export type LiveBin = {
+  start: string;
+  received: number;
+  processed: number;
+  latency_s: number | null;
+  latency_max_s: number | null;
+};
+
+export type LiveSurvey = {
+  survey: string;
+  start: string;
+  end: string;
+  received: number;
+  processed: number;
+  last_received_at: string | null;
+  bins: LiveBin[];
+};
+
+export type LiveIngest = {
+  date: string;
+  bin_minutes: number;
+  updated_at: string;
+  surveys: LiveSurvey[];
+};
+
+export type LiveNight = "current" | "previous";
+
+export async function fetchLiveIngest(night: LiveNight = "current"): Promise<LiveIngest> {
+  const res = await fetch(`${API_BASE}/stats/live?night=${night}`, { headers: optionalAuthHeaders() });
+  await ensureOk(res, "Fetch live ingest");
+  return unwrapData<LiveIngest>(await readJson(res), { date: "", bin_minutes: 10, updated_at: "", surveys: [] });
 }
 
 export type SearchResult = {
@@ -434,9 +649,84 @@ export async function searchObjects(value: string, limit: number = 10): Promise<
   };
 }
 
+/** AppleCiDEr's classification, as stored in `classifications.applecider_fusion`. */
+export type AppleCiderFusion = {
+  /** Absent, like level and probability, when every level abstained. */
+  decision_label?: string;
+  /** "class", "family" or "domain": the deepest level that survived its gate. */
+  decision_level?: string;
+  decision_probability?: number;
+  abstain_completely: boolean;
+  /** Calibrated leaf probabilities, keyed by class name ("AGN-like", ...). */
+  class_probabilities: Record<string, number>;
+};
+
+export type SimilarObject = {
+  object_id: string;
+  /** COSINE similarity, so higher is closer. */
+  score: number;
+  /** Null when that alert has no classification or it could not be looked up. */
+  applecider_fusion?: AppleCiderFusion | null;
+};
+
+/** The seed of a similarity search, with its own AppleCiDEr classification. */
+export type QueryObject = Omit<SimilarObject, "score">;
+
+/**
+ * The searched object with its AppleCiDEr classification, and the objects whose
+ * fusion embedding is closest to its own. A 404 means no embedding is stored
+ * (only ZTF alerts that pass the AppleCiDEr gate get one), so it returns no
+ * query and an empty list, with the server's explanation, rather than throwing.
+ */
+export async function fetchSimilarObjects(
+  objectId: string,
+  topK: number = 10
+): Promise<{ query?: QueryObject; results: SimilarObject[]; message?: string }> {
+  const url = `${API_BASE}/similarity/objects`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ object_id: objectId, top_k: topK }),
+  });
+  const body = await parseResponseJson(res).catch(() => null);
+  const message =
+    body && typeof body === "object" && "message" in body
+      ? String((body as { message?: unknown }).message)
+      : undefined;
+
+  if (res.status === 404) {
+    return { results: [], message: message ?? `No embedding stored for ${objectId}` };
+  }
+  if (!res.ok) {
+    throw new Error(message ?? `Similarity search failed: ${res.status}`);
+  }
+
+  const data = unwrapData<{ query?: QueryObject; neighbors?: unknown }>(body, {});
+  return {
+    query: data.query,
+    results: Array.isArray(data.neighbors) ? (data.neighbors as SimilarObject[]) : [],
+  };
+}
+
+export class EmbeddingsDisabled extends Error {}
+
+export async function fetchEmbeddingsCount(): Promise<number> {
+  const url = `${API_BASE}/embeddings/count`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    const message = `Fetch embedding count failed: ${res.status} ${txt}`;
+    throw res.status === 501 ? new EmbeddingsDisabled(message) : new Error(message);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  const data = unwrapData<{ count?: number }>(body, {});
+  return typeof data.count === "number" ? data.count : 0;
+}
+
 export default {
   login,
   logout,
+  setLogoutHandler,
   getTokenRecord,
   fetchOAuthProviders,
   startOAuthLogin,
@@ -448,10 +738,13 @@ export default {
   fetchObject,
   fetchProfile,
   updateProfileName,
+  classifyObject,
+  fetchClassificationModels,
   fetchAlerts,
   fetchAlertCutouts,
   fetchObjCutouts,
   fetchStats,
   refreshStats,
   fetchCollectionStats,
+  fetchLiveIngest,
 };

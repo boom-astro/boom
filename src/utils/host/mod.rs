@@ -35,17 +35,20 @@ mod dlr;
 mod ellipse;
 mod error;
 mod likelihood;
+mod photometry;
 mod prior;
+mod ps1;
 mod sersic;
 mod types;
 
 pub use associate::{associate_host, AssociationConfig, AssociationResult};
-pub use association::{HostGalaxyAssociation, StoredHostCandidate};
-pub use catalog::{collect_galaxies, galaxy_from_ls_dr10, galaxy_from_ned, LS_DR10, NED};
-pub use config::HostGalaxyConfig;
+pub use association::{HostGalaxyAssociation, HostSummary, StoredHostCandidate};
+pub use catalog::{collect_galaxies, galaxy_from_legacy, galaxy_from_ned, LS_DR10, LS_DR9, NED};
+pub use config::{HostGalaxyConfig, Ps1FallbackConfig};
 pub use dlr::{compute_dlr, DlrResult};
 pub use ellipse::Ellipse;
 pub use error::HostError;
+pub use photometry::{attach_photometry, HostPhotometry};
 pub use types::{GalaxyCandidate, HostCandidate, Transient};
 
 /// Run host association for one alert from its cross-match results.
@@ -74,6 +77,103 @@ pub fn associate_from_xmatches(
             // The only error is "no candidates", which the guard above rules out.
             .unwrap_or_else(|_| HostGalaxyAssociation::empty()),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn associate_with_photometry(
+    ra: f64,
+    dec: f64,
+    xmatches: &HashMap<String, Vec<Document>>,
+    config: &HostGalaxyConfig,
+    xmatch_configs: &[crate::conf::CatalogXmatchConfig],
+    survey: &crate::utils::enums::Survey,
+    object_id: &str,
+    db: &mongodb::Database,
+) -> Option<HostGalaxyAssociation> {
+    let mut association = associate_from_xmatches(ra, dec, xmatches, config)?;
+    if association.best_host.is_none() {
+        if let Some(fallback) =
+            ps1::associate(ra, dec, xmatches, config, survey, object_id, db).await
+        {
+            association = fallback;
+        }
+    }
+    add_spectrum_at_host_center(
+        &mut association,
+        xmatches,
+        config,
+        xmatch_configs,
+        survey,
+        object_id,
+        db,
+    )
+    .await;
+    attach_photometry(
+        &mut association,
+        xmatches,
+        config,
+        xmatch_configs,
+        survey,
+        object_id,
+        db,
+    )
+    .await;
+    Some(association)
+}
+
+/// The alert's DESI cross-match is cut at a projected distance from the transient.
+#[allow(clippy::too_many_arguments)]
+async fn add_spectrum_at_host_center(
+    association: &mut HostGalaxyAssociation,
+    xmatches: &HashMap<String, Vec<Document>>,
+    config: &HostGalaxyConfig,
+    xmatch_configs: &[crate::conf::CatalogXmatchConfig],
+    survey: &crate::utils::enums::Survey,
+    object_id: &str,
+    db: &mongodb::Database,
+) {
+    let Some(best) = association.best_host.as_ref() else {
+        return;
+    };
+    if !catalog::lacks_spectroscopic_redshift(best.z, best.z_type.as_deref()) {
+        return;
+    }
+    let (ra, dec, radius) = (best.ra, best.dec, config.spectrum_match_arcsec);
+    let in_xmatches = xmatches
+        .get(&config.desi_catalog)
+        .and_then(|rows| catalog::nearest_galaxy_spectrum(rows, ra, dec, radius))
+        .is_some();
+    if in_xmatches {
+        return;
+    }
+    let Some(rows) = photometry::rows_at(
+        ra,
+        dec,
+        &config.desi_catalog,
+        radius,
+        xmatch_configs,
+        survey,
+        object_id,
+        db,
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(spectrum) = catalog::nearest_galaxy_spectrum(&rows, ra, dec, radius) else {
+        return;
+    };
+    let z = crate::utils::spatial::get_opt_f64_from_doc(spectrum, "z");
+    let z_err = crate::utils::spatial::get_opt_f64_from_doc(spectrum, "zerr");
+    for host in association
+        .best_host
+        .iter_mut()
+        .chain(association.candidates.first_mut())
+    {
+        host.z = z;
+        host.z_err = z_err;
+        host.z_type = Some(catalog::SPECTROSCOPIC.to_string());
+    }
 }
 
 #[cfg(test)]

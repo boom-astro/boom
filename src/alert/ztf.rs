@@ -21,12 +21,13 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::RangeInclusive};
 use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "ZTF";
 pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
+const ZTF_DIFFMAGLIM_RANGE: RangeInclusive<f32> = 10.0..=30.0;
 // Position uncertainty in arcsec (median FHWM from https://www.ztf.caltech.edu/ztf-camera.html)
 pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
@@ -60,47 +61,88 @@ pub struct Cutout {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct PrvCandidate {
+    /// Observation Julian date at start of exposure [days].
     pub jd: f64,
+    /// Filter ID (1=g; 2=R; 3=i).
     pub fid: i32,
+    /// Processing ID for image.
     pub pid: i64,
+    /// Expected 5-sigma mag limit in difference image based on global noise estimate [mag].
     pub diffmaglim: Option<f32>,
+    /// Principal investigator attached to program ID.
     pub programpi: Option<String>,
+    /// Program ID: encodes either public, collab, or caltech mode.
     pub programid: i32,
+    /// Candidate ID from operations DB.
     pub candid: Option<i64>,
+    /// True when the difference is positive, the source brighter than the reference.
     #[serde(deserialize_with = "deserialize_isdiffpos_option")]
     pub isdiffpos: Option<bool>,
+    /// Night ID.
     pub nid: Option<i32>,
+    /// Readout channel ID [00 .. 63].
     pub rcid: Option<i32>,
+    /// ZTF field ID.
     pub field: Option<i32>,
+    /// Right Ascension of candidate; J2000 [deg].
     pub ra: Option<f64>,
+    /// Declination of candidate; J2000 [deg].
     pub dec: Option<f64>,
+    /// Magnitude from PSF-fit photometry [mag].
     pub magpsf: Option<f32>,
+    /// 1-sigma uncertainty in magpsf [mag].
     pub sigmapsf: Option<f32>,
+    /// Reduced chi-square for PSF-fit.
     pub chipsf: Option<f32>,
+    /// Aperture mag using 14 pixel diameter aperture [mag].
     pub magap: Option<f32>,
+    /// 1-sigma uncertainty in magap [mag].
     pub sigmagap: Option<f32>,
+    /// Distance to nearest source in reference image PSF-catalog [pixels].
     pub distnr: Option<f32>,
+    /// Magnitude of nearest source in reference image PSF-catalog [mag].
     pub magnr: Option<f32>,
+    /// 1-sigma uncertainty in magnr [mag].
     pub sigmagnr: Option<f32>,
+    /// DAOPhot chi parameter of nearest source in reference image PSF-catalog.
     pub chinr: Option<f32>,
+    /// DAOPhot sharp parameter of nearest source in reference image PSF-catalog.
     pub sharpnr: Option<f32>,
+    /// Local sky background estimate [DN].
     pub sky: Option<f32>,
+    /// Full Width Half Max assuming a Gaussian core, from SExtractor [pixels].
     pub fwhm: Option<f32>,
+    /// Distance to nearest edge in image [pixels].
     pub mindtoedge: Option<f32>,
+    /// Ratio: difffwhm / fwhm.
     pub seeratio: Option<f32>,
+    /// Windowed profile RMS afloat major axis from SExtractor [pixels].
     pub aimage: Option<f32>,
+    /// Windowed profile RMS afloat minor axis from SExtractor [pixels].
     pub bimage: Option<f32>,
+    /// Ratio: aimage / bimage.
     pub elong: Option<f32>,
+    /// Number of negative pixels in a 5 x 5 pixel stamp.
     pub nneg: Option<i32>,
+    /// Number of prior-tagged bad pixels in a 5 x 5 pixel stamp.
     pub nbad: Option<i32>,
+    /// RealBogus quality score; range is 0 to 1 where closer to 1 is more reliable.
     pub rb: Option<f32>,
+    /// Distance to nearest known solar system object if exists within 30 arcsec [arcsec].
     pub ssdistnr: Option<f32>,
+    /// Magnitude of nearest known solar system object if exists within 30 arcsec (usually V-band
+    /// from MPC archive) [mag].
     pub ssmagnr: Option<f32>,
+    /// Name of nearest known solar system object if exists within 30 arcsec (from MPC archive).
     #[serde(deserialize_with = "deserialize_ssnamenr")]
     pub ssnamenr: Option<String>,
+    /// Right Ascension of nearest source in reference image PSF-catalog; J2000 [deg].
     pub ranr: Option<f64>,
+    /// Declination of nearest source in reference image PSF-catalog; J2000 [deg].
     pub decnr: Option<f64>,
+    /// Peak-pixel signal-to-noise ratio in point source matched-filtered detection image.
     pub scorr: Option<f64>,
+    /// Magnitude zero point for photometry estimates [mag].
     pub magzpsci: Option<f32>,
 }
 
@@ -148,17 +190,16 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
                 let (flux, flux_err) = mag2flux(mag, sigmag, ZTF_ZP);
                 let snr = flux / flux_err;
                 (
-                    Some(if isdiff {
-                        flux * 1e9_f32
-                    } else {
-                        -flux * 1e9_f32
-                    }), // convert to nJy
-                    Some(flux_err * 1e9_f32), // convert to nJy
+                    Some(if isdiff { flux } else { -flux }),
+                    Some(flux_err),
                     Some(snr),
                 )
             }
             (None, None, None, Some(diffmaglim)) => {
-                let flux_err = diffmaglim2fluxerr(diffmaglim, ZTF_ZP) * 1e9_f32; // convert to nJy
+                let flux_err = diffmaglim2fluxerr(diffmaglim, ZTF_ZP);
+                if !ZTF_DIFFMAGLIM_RANGE.contains(&diffmaglim) || !flux_err.is_finite() {
+                    return Err(AlertError::InvalidDiffmaglim(diffmaglim));
+                }
                 (None, Some(flux_err), None)
             }
             _ => {
@@ -172,12 +213,8 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
                     let (flux, flux_err) = mag2flux(magap, sigmagap, ZTF_ZP);
                     let snr = flux / flux_err;
                     (
-                        Some(if isdiff {
-                            flux * 1e9_f32
-                        } else {
-                            -flux * 1e9_f32
-                        }), // convert to nJy
-                        Some(flux_err * 1e9_f32), // convert to nJy
+                        Some(if isdiff { flux } else { -flux }),
+                        Some(flux_err),
                         Some(snr),
                     )
                 }
@@ -237,27 +274,48 @@ where
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct FpHist {
+    /// ZTF field ID.
     pub field: Option<i32>,
+    /// Readout channel ID [00 .. 63].
     pub rcid: Option<i32>,
+    /// Filter ID (1=g; 2=R; 3=i).
     pub fid: i32,
+    /// Processing ID for image.
     pub pid: i64,
+    /// Processing ID for reference image to facilitate archive retrieval.
     pub rfid: i64,
+    /// Magnitude zero point for photometry estimates [mag].
     pub magzpsci: Option<f32>,
+    /// Magnitude zero point uncertainty (in magzpsci) [mag].
     pub magzpsciunc: Option<f32>,
+    /// RMS (deviation from average) in all differences between instrumental photometry and matched
+    /// photometric calibrators from science image processing [mag].
     pub magzpscirms: Option<f32>,
+    /// Integration time of camera exposure [sec].
     pub exptime: Option<f32>,
+    /// Expected 5-sigma mag limit in difference image based on global noise estimate [mag].
     pub diffmaglim: Option<f32>,
+    /// Program ID: encodes either public, collab, or caltech mode.
     pub programid: i32,
+    /// Observation Julian date at start of exposure [days].
     pub jd: f64,
+    /// Forced difference image PSF-fit flux [DN].
     #[serde(deserialize_with = "deserialize_missing_flux")]
     pub forcediffimflux: Option<f32>,
+    /// 1-sigma uncertainty in forcediffimflux [DN].
     #[serde(deserialize_with = "deserialize_missing_flux")]
     pub forcediffimfluxunc: Option<f32>,
+    /// Forced photometry processing status codes (0 => no warnings); see documentation.
     pub procstatus: Option<String>,
+    /// Distance to nearest source in reference image PSF-catalog [arcsec].
     pub distnr: Option<f32>,
+    /// Magnitude of nearest source in reference image PSF-catalog [mag].
     pub magnr: Option<f32>,
+    /// 1-sigma uncertainty in magnr [mag].
     pub sigmagnr: Option<f32>,
+    /// DAOPhot chi parameter of nearest source in reference image PSF-catalog.
     pub chinr: Option<f32>,
+    /// DAOPhot sharp parameter of nearest source in reference image PSF-catalog.
     pub sharpnr: Option<f32>,
 }
 
@@ -309,7 +367,7 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
                         Some(sigmapsf),
                         Some(psf_flux > 0.0),
                         Some(psf_flux_abs / psf_flux_err),
-                        Some((psf_flux as f64 * 1e9 * zp_scaling_factor) as f32), // convert to nJy and a fixed ZTF_ZP
+                        Some((psf_flux as f64 * zp_scaling_factor) as f32),
                     )
                 } else {
                     (
@@ -317,19 +375,24 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
                         None,
                         None,
                         None,
-                        Some((psf_flux as f64 * 1e9 * zp_scaling_factor) as f32),
-                    ) // convert to nJy and a fixed ZTF_ZP
+                        Some((psf_flux as f64 * zp_scaling_factor) as f32),
+                    )
                 }
             }
             _ => (None, None, None, None, None),
         };
+
+        let psf_flux_err = (psf_flux_err as f64 * zp_scaling_factor) as f32;
+        if !psf_flux_err.is_finite() || !psf_flux.is_none_or(f32::is_finite) {
+            return Err(AlertError::NonFiniteFluxPSF);
+        }
 
         Ok(ZtfForcedPhot {
             fp_hist,
             magpsf,
             sigmapsf,
             psf_flux,
-            psf_flux_err: Some((psf_flux_err as f64 * 1e9 * zp_scaling_factor) as f32), // convert to nJy and a fixed ZTF_ZP
+            psf_flux_err: Some(psf_flux_err),
             isdiffpos,
             snr_psf,
             band,
@@ -349,88 +412,202 @@ impl TimeSeries for ZtfForcedPhot {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct Candidate {
+    /// Observation Julian date at start of exposure [days].
     pub jd: f64,
+    /// Filter ID (1=g; 2=R; 3=i).
     pub fid: i32,
+    /// Processing ID for science image to facilitate archive retrieval.
     pub pid: i64,
+    /// Expected 5-sigma mag limit in difference image based on global noise estimate [mag].
     pub diffmaglim: Option<f32>,
+    /// Principal investigator attached to program ID.
     pub programpi: Option<String>,
+    /// Program ID: encodes either public, collab, or caltech mode.
     pub programid: i32,
     /// Whether the exposure was a Target of Opportunity, as WINTER reports it.
     #[serde(deserialize_with = "deserialize_tooflag")]
     pub tooflag: bool,
+    /// Candidate ID from operations DB.
     pub candid: i64,
+    /// True when the difference is positive, the source brighter than the reference.
     #[serde(deserialize_with = "deserialize_isdiffpos")]
     pub isdiffpos: bool,
+    /// Night ID.
     pub nid: Option<i32>,
+    /// Readout channel ID [00 .. 63].
     pub rcid: Option<i32>,
+    /// ZTF field ID.
     pub field: Option<i32>,
+    /// Right Ascension of candidate; J2000 [deg].
     pub ra: f64,
+    /// Declination of candidate; J2000 [deg].
     pub dec: f64,
+    /// Magnitude from PSF-fit photometry [mag].
     pub magpsf: f32,
+    /// 1-sigma uncertainty in magpsf [mag].
     pub sigmapsf: f32,
+    /// Reduced chi-square for PSF-fit.
     pub chipsf: Option<f32>,
+    /// Aperture mag using 14 pixel diameter aperture [mag].
     pub magap: Option<f32>,
+    /// 1-sigma uncertainty in magap [mag].
     pub sigmagap: Option<f32>,
+    /// Distance to nearest source in reference image PSF-catalog [pixels].
     pub distnr: Option<f32>,
+    /// Magnitude of nearest source in reference image PSF-catalog [mag].
     pub magnr: Option<f32>,
+    /// 1-sigma uncertainty in magnr [mag].
     pub sigmagnr: Option<f32>,
+    /// DAOPhot chi parameter of nearest source in reference image PSF-catalog.
     pub chinr: Option<f32>,
+    /// DAOPhot sharp parameter of nearest source in reference image PSF-catalog.
     pub sharpnr: Option<f32>,
+    /// Local sky background estimate [DN].
     pub sky: Option<f32>,
+    /// Full Width Half Max assuming a Gaussian core, from SExtractor [pixels].
     pub fwhm: Option<f32>,
+    /// Star/Galaxy classification score from SExtractor.
     pub classtar: Option<f32>,
+    /// Distance to nearest edge in image [pixels].
     pub mindtoedge: Option<f32>,
+    /// Ratio: difffwhm / fwhm.
     pub seeratio: Option<f32>,
+    /// Windowed profile RMS afloat major axis from SExtractor [pixels].
     pub aimage: Option<f32>,
+    /// Windowed profile RMS afloat minor axis from SExtractor [pixels].
     pub bimage: Option<f32>,
+    /// Ratio: aimage / bimage.
     pub elong: Option<f32>,
+    /// Number of negative pixels in a 5 x 5 pixel stamp.
     pub nneg: Option<i32>,
+    /// Number of prior-tagged bad pixels in a 5 x 5 pixel stamp.
     pub nbad: Option<i32>,
+    /// RealBogus quality score from Random Forest classifier; range is 0 to 1 where closer to 1 is
+    /// more reliable.
     pub rb: Option<f32>,
+    /// Distance to nearest known solar system object if exists within 30 arcsec [arcsec].
     pub ssdistnr: Option<f32>,
+    /// Magnitude of nearest known solar system object if exists within 30 arcsec (usually V-band
+    /// from MPC archive) [mag].
     pub ssmagnr: Option<f32>,
+    /// Name of nearest known solar system object if exists within 30 arcsec (from MPC archive).
     #[serde(deserialize_with = "deserialize_ssnamenr")]
     pub ssnamenr: Option<String>,
+    /// Right Ascension of nearest source in reference image PSF-catalog; J2000 [deg].
     pub ranr: f64,
+    /// Declination of nearest source in reference image PSF-catalog; J2000 [deg].
     pub decnr: f64,
+    /// g-band PSF-fit magnitude of closest source from PS1 catalog; if exists within 30 arcsec
+    /// [mag].
     pub sgmag1: Option<f32>,
+    /// r-band PSF-fit magnitude of closest source from PS1 catalog; if exists within 30 arcsec
+    /// [mag].
     pub srmag1: Option<f32>,
+    /// i-band PSF-fit magnitude of closest source from PS1 catalog; if exists within 30 arcsec
+    /// [mag].
     pub simag1: Option<f32>,
+    /// z-band PSF-fit magnitude of closest source from PS1 catalog; if exists within 30 arcsec
+    /// [mag].
     pub szmag1: Option<f32>,
+    /// Star/Galaxy score of closest source from PS1 catalog; if exists within 30 arcsec:
+    /// 0 <= sgscore <= 1 where closer to 1 implies higher likelihood of being a star.
     pub sgscore1: Option<f32>,
+    /// Distance to closest source from PS1 catalog; if exists within 30 arcsec [arcsec].
     pub distpsnr1: Option<f32>,
+    /// IPAC's count of earlier detections within 1.5" on the same field and readout
+    /// channel, which differs from `properties.detection_history.n_pos`.
     pub ndethist: i32,
+    /// Number of times input candidate position fell on any field and readout-channel going back to
+    /// beginning of survey.
     pub ncovhist: i32,
+    /// Earliest Julian date of epoch corresponding to ndethist [days].
     pub jdstarthist: Option<f64>,
+    /// Peak-pixel signal-to-noise ratio in point source matched-filtered detection image.
     pub scorr: Option<f64>,
+    /// g-band PSF-fit magnitude of second closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub sgmag2: Option<f32>,
+    /// r-band PSF-fit magnitude of second closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub srmag2: Option<f32>,
+    /// i-band PSF-fit magnitude of second closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub simag2: Option<f32>,
+    /// z-band PSF-fit magnitude of second closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub szmag2: Option<f32>,
+    /// Star/Galaxy score of second closest source from PS1 catalog; if exists within 30 arcsec:
+    /// 0 <= sgscore <= 1 where closer to 1 implies higher likelihood of being a star.
     pub sgscore2: Option<f32>,
+    /// Distance to second closest source from PS1 catalog; if exists within 30 arcsec [arcsec].
     pub distpsnr2: Option<f32>,
+    /// g-band PSF-fit magnitude of third closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub sgmag3: Option<f32>,
+    /// r-band PSF-fit magnitude of third closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub srmag3: Option<f32>,
+    /// i-band PSF-fit magnitude of third closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub simag3: Option<f32>,
+    /// z-band PSF-fit magnitude of third closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub szmag3: Option<f32>,
+    /// Star/Galaxy score of third closest source from PS1 catalog; if exists within 30 arcsec:
+    /// 0 <= sgscore <= 1 where closer to 1 implies higher likelihood of being a star.
     pub sgscore3: Option<f32>,
+    /// Distance to third closest source from PS1 catalog; if exists within 30 arcsec [arcsec].
     pub distpsnr3: Option<f32>,
+    /// Number of source matches from PS1 catalog falling within 30 arcsec.
     pub nmtchps: i32,
+    /// Processing ID for reference image to facilitate archive retrieval.
+    #[serde(deserialize_with = "deserialize_some")]
+    pub rfid: Option<i64>,
+    /// Observation Julian date of earliest exposure used to generate reference image [days].
+    #[serde(deserialize_with = "deserialize_some")]
+    pub jdstartref: Option<f64>,
+    /// Observation Julian date of latest exposure used to generate reference image [days].
+    #[serde(deserialize_with = "deserialize_some")]
+    pub jdendref: Option<f64>,
+    /// Number of frames (epochal images) used to generate reference image.
+    #[serde(deserialize_with = "deserialize_some")]
+    pub nframesref: Option<i32>,
+    /// Ratio: D/stddev(D) on event position where D = difference image.
     pub dsnrms: Option<f32>,
+    /// Ratio: S/stddev(S) on event position where S = image of convolution: D (x) PSF(D).
     pub ssnrms: Option<f32>,
+    /// Difference of statistics: dsnrms - ssnrms.
     pub dsdiff: Option<f32>,
+    /// Magnitude zero point for photometry estimates [mag].
     pub magzpsci: Option<f32>,
+    /// Magnitude zero point uncertainty (in magzpsci) [mag].
     pub magzpsciunc: Option<f32>,
+    /// RMS (deviation from average) in all differences between instrumental photometry and matched
+    /// photometric calibrators from science image processing [mag].
     pub magzpscirms: Option<f32>,
+    /// Magnitude zero point from median of all differences between instrumental photometry and
+    /// matched photometric calibrators from science image processing [mag].
     pub zpmed: Option<f32>,
+    /// Integration time of camera exposure [sec].
     pub exptime: Option<f32>,
+    /// Deep-learning real/bogus score, 1 for real: the usual realness cut.
     pub drb: Option<f32>,
 
+    /// Color coefficient from linear fit from photometric calibration of science image.
     pub clrcoeff: Option<f32>,
+    /// Color coefficient uncertainty from linear fit (corresponding to clrcoeff).
     pub clrcounc: Option<f32>,
+    /// Distance to closest source from Gaia DR1 catalog irrespective of magnitude; if exists within
+    /// 90 arcsec [arcsec].
     pub neargaia: Option<f32>,
+    /// Gaia (G-band) magnitude of closest source from Gaia DR1 catalog irrespective of magnitude;
+    /// if exists within 90 arcsec [mag].
     pub maggaia: Option<f32>,
+    /// Distance to closest source from Gaia DR1 catalog brighter than magnitude 14; if exists
+    /// within 90 arcsec [arcsec].
     pub neargaiabright: Option<f32>,
+    /// Gaia (G-band) magnitude of closest source from Gaia DR1 catalog brighter than magnitude 14;
+    /// if exists within 90 arcsec [mag].
     pub maggaiabright: Option<f32>,
 }
 
@@ -498,6 +675,15 @@ where
     Ok(Some(fp_hists))
 }
 
+/// Plain in the IPAC schema, but missing from alerts stored before BOOM kept them.
+fn deserialize_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 fn deserialize_ssnamenr<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -536,8 +722,8 @@ impl TryFrom<Candidate> for ZtfCandidate {
         let isdiffpos = candidate.isdiffpos;
         let band = fid2band(candidate.fid)?;
 
-        let (psf_flux_jy, psf_flux_err_jy) = mag2flux(magpsf, sigmapsf, ZTF_ZP);
-        let (ap_flux_jy, ap_flux_err_jy, snr_ap) = match (candidate.magap, candidate.sigmagap) {
+        let (psf_flux, psf_flux_err) = mag2flux(magpsf, sigmapsf, ZTF_ZP);
+        let (ap_flux, ap_flux_err, snr_ap) = match (candidate.magap, candidate.sigmagap) {
             (Some(magap), Some(sigmagap)) => {
                 let (flux, flux_err) = mag2flux(magap, sigmagap, ZTF_ZP);
                 (Some(flux), Some(flux_err), Some(flux / flux_err))
@@ -547,21 +733,11 @@ impl TryFrom<Candidate> for ZtfCandidate {
 
         Ok(ZtfCandidate {
             candidate,
-            psf_flux: if isdiffpos {
-                psf_flux_jy * 1e9_f32
-            } else {
-                -psf_flux_jy * 1e9_f32
-            }, // convert to nJy
-            psf_flux_err: psf_flux_err_jy * 1e9_f32, // convert to nJy
-            snr_psf: Some(psf_flux_jy / psf_flux_err_jy),
-            ap_flux: ap_flux_jy.map(|flux| {
-                if isdiffpos {
-                    flux * 1e9_f32
-                } else {
-                    -flux * 1e9_f32
-                }
-            }), // convert to nJy
-            ap_flux_err: ap_flux_err_jy.map(|flux_err| flux_err * 1e9_f32), // convert to nJy
+            psf_flux: if isdiffpos { psf_flux } else { -psf_flux },
+            psf_flux_err,
+            snr_psf: Some(psf_flux / psf_flux_err),
+            ap_flux: ap_flux.map(|flux| if isdiffpos { flux } else { -flux }),
+            ap_flux_err,
             snr_ap,
             band,
         })
@@ -645,7 +821,8 @@ pub struct ZtfRawAvroAlert {
     pub candidate: ZtfCandidate,
     #[serde(deserialize_with = "deserialize_prv_candidates")]
     pub prv_candidates: Option<Vec<ZtfPrvCandidate>>,
-    #[serde(deserialize_with = "deserialize_fp_hists")]
+    // Absent from schemas before 4.0 (alerts up to mid-2023).
+    #[serde(default, deserialize_with = "deserialize_fp_hists")]
     pub fp_hists: Option<Vec<ZtfForcedPhot>>,
     #[serde(
         rename = "cutoutScience",
@@ -882,6 +1059,112 @@ impl ZtfAlertWorker {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_aux(
+        &mut self,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        prv_candidates: Vec<ZtfPrvCandidate>,
+        prv_nondetections: Vec<ZtfPrvCandidate>,
+        fp_hists: Vec<ZtfForcedPhot>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let survey_matches = Some(
+            self.get_survey_matches(ra, dec)
+                .await
+                .inspect_err(as_error!())?,
+        );
+        let is_sso = prv_candidates
+            .last()
+            .is_some_and(|p| p.prv_candidate.ssnamenr.is_some());
+        if let Some(id) = survey_matches
+            .as_ref()
+            .and_then(|a| a.lsst.first())
+            .filter(|_| !is_sso)
+        {
+            self.link_counterpart(
+                &self.lsst_alert_aux_collection,
+                id,
+                object_id,
+                "ZTF",
+                "DECAM",
+            )
+            .await
+            .inspect_err(as_error!())?;
+        }
+
+        let existing_alert_aux = self.get_existing_aux(object_id).await?;
+
+        if let Some(existing) = existing_alert_aux {
+            self.update_aux(
+                object_id,
+                &prv_candidates,
+                &prv_nondetections,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing,
+            )
+            .await
+            .inspect_err(as_error!())?;
+            return Ok(());
+        }
+
+        let xmatches = xmatch(
+            ra,
+            dec,
+            object_id,
+            &Survey::Ztf,
+            &self.xmatch_configs,
+            &self.db,
+        )
+        .await?;
+        let host_galaxy = host::associate_with_photometry(
+            ra,
+            dec,
+            &xmatches,
+            &self.host_galaxy_config,
+            &self.xmatch_configs,
+            &Survey::Ztf,
+            object_id,
+            &self.db,
+        )
+        .await;
+        let obj = ZtfObject {
+            object_id: object_id.to_string(),
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            cross_matches: Some(xmatches),
+            host_galaxy,
+            aliases: survey_matches,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+        let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
+        if let Err(AlertError::AlertAuxExists) = result {
+            debug!(
+                "Alert aux document for object_id {} already exists. Using fallback update.",
+                object_id
+            );
+            self.update_aux_fallback(
+                object_id,
+                &obj.prv_candidates,
+                &obj.prv_nondetections,
+                &obj.fp_hists,
+                &obj.aliases,
+                now,
+            )
+            .await
+            .inspect_err(as_error!())?;
+        } else {
+            result.inspect_err(as_error!())?;
+        }
+        Ok(())
+    }
+
     async fn update_aux(
         &mut self,
         object_id: &str,
@@ -943,6 +1226,11 @@ impl AlertWorker for ZtfAlertWorker {
             .build_db()
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
+
+        // Warns rather than fails: a crossmatch catalog that is configured but
+        // empty produces zero matches on every alert, which is
+        // indistinguishable from a genuine non-match.
+        crate::catalogs::warn_on_empty_crossmatch_catalogs(&db, &xmatch_configs).await;
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
@@ -1022,89 +1310,39 @@ impl AlertWorker for ZtfAlertWorker {
             updated_at: now,
         };
 
+        if self
+            .check_alert_exists(candid, &self.alert_collection)
+            .await
+            .inspect_err(as_error!())?
+        {
+            return Ok(ProcessAlertStatus::Exists(candid));
+        }
+
+        self.upsert_aux(
+            &object_id,
+            ra,
+            dec,
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            now,
+        )
+        .await?;
+
+        self.format_and_insert_cutouts(
+            candid,
+            &object_id,
+            avro_alert.cutout_science,
+            avro_alert.cutout_template,
+            avro_alert.cutout_difference,
+            &self.alert_cutout_storage,
+        )
+        .await
+        .inspect_err(as_error!())?;
+
+        // Inserted last: an alert in the database implies its aux and cutouts are there too.
         let status = self
             .format_and_insert_alert(candid, &alert, &self.alert_collection)
-            .await
-            .inspect_err(as_error!())?;
-
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
-        }
-
-        let survey_matches = Some(
-            self.get_survey_matches(ra, dec)
-                .await
-                .inspect_err(as_error!())?,
-        );
-
-        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
-
-        if let Some(existing) = existing_alert_aux {
-            self.update_aux(
-                &object_id,
-                &prv_candidates,
-                &prv_nondetections,
-                &fp_hists,
-                &survey_matches,
-                now,
-                &existing,
-            )
-            .await
-            .inspect_err(as_error!())?;
-        } else {
-            let xmatches = xmatch(
-                ra,
-                dec,
-                &object_id,
-                &Survey::Ztf,
-                &self.xmatch_configs,
-                &self.db,
-            )
-            .await?;
-            let host_galaxy =
-                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
-            let obj = ZtfObject {
-                object_id: object_id.clone(),
-                prv_candidates,
-                prv_nondetections,
-                fp_hists,
-                cross_matches: Some(xmatches),
-                host_galaxy,
-                aliases: survey_matches,
-                coordinates: Coordinates::new(ra, dec),
-                created_at: now,
-                updated_at: now,
-            };
-            let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
-            if let Err(AlertError::AlertAuxExists) = result {
-                debug!(
-                    "Alert aux document for object_id {} already exists. Using fallback update.",
-                    object_id
-                );
-                self.update_aux_fallback(
-                    &object_id,
-                    &obj.prv_candidates,
-                    &obj.prv_nondetections,
-                    &obj.fp_hists,
-                    &obj.aliases,
-                    now,
-                )
-                .await
-                .inspect_err(as_error!())?;
-            } else {
-                result.inspect_err(as_error!())?;
-            }
-        }
-
-        let status = self
-            .format_and_insert_cutouts(
-                candid,
-                &object_id,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_storage,
-            )
             .await
             .inspect_err(as_error!())?;
 
@@ -1123,6 +1361,35 @@ mod tests {
             AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
         },
     };
+    use apache_avro::{from_value, types::Value, Reader};
+
+    fn read_test_alert_value() -> Value {
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        Reader::new(&avro_bytes[..])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+    }
+
+    fn corrupt_first_point(alert: &mut Value, series: &str, field: &str, corrupt: f32) {
+        let Value::Record(fields) = alert else {
+            panic!()
+        };
+        let (_, Value::Union(_, points)) =
+            fields.iter_mut().find(|(name, _)| name == series).unwrap()
+        else {
+            panic!()
+        };
+        let Value::Array(points) = points.as_mut() else {
+            panic!()
+        };
+        let Value::Record(point) = &mut points[0] else {
+            panic!()
+        };
+        let (_, value) = point.iter_mut().find(|(name, _)| name == field).unwrap();
+        *value = Value::Union(1, Box::new(Value::Float(corrupt)));
+    }
 
     struct ZtfPrvLightcurveGen {
         template: ZtfPrvCandidate,
@@ -1355,16 +1622,16 @@ mod tests {
 
         assert_eq!(avro_alert.candidate.candidate.ra, ra);
         assert_eq!(avro_alert.candidate.candidate.dec, dec);
-        assert!((avro_alert.candidate.psf_flux + 3957191600000.0).abs() < 1e-3);
-        assert!((avro_alert.candidate.psf_flux_err - 55887786000.0).abs() < 1e-3);
+        assert!((avro_alert.candidate.psf_flux / -3957191.6 - 1.0).abs() < 1e-5);
+        assert!((avro_alert.candidate.psf_flux_err / 55887.786 - 1.0).abs() < 1e-5);
         assert!(
             (avro_alert.candidate.snr_psf.unwrap()
                 - avro_alert.candidate.psf_flux.abs() / avro_alert.candidate.psf_flux_err)
                 .abs()
                 < 1e-6
         );
-        assert!((avro_alert.candidate.ap_flux.unwrap() + 3650897600000.0).abs() < 1e-3);
-        assert!((avro_alert.candidate.ap_flux_err.unwrap() - 24546988000.0).abs() < 1e-3);
+        assert!((avro_alert.candidate.ap_flux.unwrap() / -3650897.6 - 1.0).abs() < 1e-5);
+        assert!((avro_alert.candidate.ap_flux_err.unwrap() / 24546.988 - 1.0).abs() < 1e-5);
         assert!(
             (avro_alert.candidate.snr_ap.unwrap()
                 - avro_alert.candidate.ap_flux.unwrap().abs()
@@ -1376,11 +1643,11 @@ mod tests {
 
         // let's also verify that we can recover the original magpsf and sigmapsf from the flux and flux_err for the detection
         let (magpsf, sigmapsf) = flux2mag(
-            avro_alert.candidate.psf_flux.abs() / 1e9_f32, // convert back to Jy
-            avro_alert.candidate.psf_flux_err / 1e9_f32,   // convert back to Jy
+            avro_alert.candidate.psf_flux.abs(),
+            avro_alert.candidate.psf_flux_err,
             ZTF_ZP,
         );
-        assert!((magpsf - avro_alert.candidate.candidate.magpsf).abs() < 1e-6);
+        assert!((magpsf - avro_alert.candidate.candidate.magpsf).abs() < 1e-5);
         assert!((sigmapsf - avro_alert.candidate.candidate.sigmapsf).abs() < 1e-6);
 
         // validate the prv_candidates
@@ -1414,11 +1681,11 @@ mod tests {
 
         // let's also verify that we can recover the original magpsf and sigmapsf from the flux and flux_err for the detection
         let (magpsf, sigmapsf) = flux2mag(
-            detection.psf_flux.unwrap() / 1e9_f32,     // convert back to Jy
-            detection.psf_flux_err.unwrap() / 1e9_f32, // convert back to Jy
+            detection.psf_flux.unwrap(),
+            detection.psf_flux_err.unwrap(),
             ZTF_ZP,
         );
-        assert!((magpsf - detection.prv_candidate.magpsf.unwrap()).abs() < 1e-6);
+        assert!((magpsf - detection.prv_candidate.magpsf.unwrap()).abs() < 1e-5);
         assert!((sigmapsf - detection.prv_candidate.sigmapsf.unwrap()).abs() < 1e-6);
 
         // validate the fp_hists
@@ -1437,8 +1704,10 @@ mod tests {
         assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
         assert!(
             (fp_negative_det.snr_psf.unwrap()
-                - fp_negative_det.psf_flux.unwrap().abs() / fp_negative_det.psf_flux_err.unwrap())
-            .abs()
+                / (fp_negative_det.psf_flux.unwrap().abs()
+                    / fp_negative_det.psf_flux_err.unwrap())
+                - 1.0)
+                .abs()
                 < 1e-6
         );
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
@@ -1446,21 +1715,19 @@ mod tests {
         // let's verify that the psf_flux is negative AND that we can recover the original magpsf and sigmapsf from the flux and flux_err
         assert!(fp_negative_det.psf_flux.unwrap() < 0.0);
         let (magpsf, sigmapsf) = flux2mag(
-            -fp_negative_det.psf_flux.unwrap() / 1e9_f32, // convert back to Jy
-            fp_negative_det.psf_flux_err.unwrap() / 1e9_f32, // convert back to Jy
+            -fp_negative_det.psf_flux.unwrap(),
+            fp_negative_det.psf_flux_err.unwrap(),
             ZTF_ZP,
         );
-        assert!((magpsf - 15.949999).abs() < 1e-6);
+        assert!((magpsf - 15.949999).abs() < 1e-5);
         assert!((sigmapsf - 0.002316).abs() < 1e-6);
         // let's also verify that forcediffimflux(unc) converts to psfFlux(Err) correctly
         let zp_scaling_factor =
             10f64.powf((ZTF_ZP as f64 - fp_negative_det.fp_hist.magzpsci.unwrap() as f64) / 2.5);
-        let expected_flux = (fp_negative_det.fp_hist.forcediffimflux.unwrap() as f64
-            * 1e9
-            * zp_scaling_factor) as f32;
-        let expected_flux_err = (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() as f64
-            * 1e9
-            * zp_scaling_factor) as f32;
+        let expected_flux =
+            (fp_negative_det.fp_hist.forcediffimflux.unwrap() as f64 * zp_scaling_factor) as f32;
+        let expected_flux_err =
+            (fp_negative_det.fp_hist.forcediffimfluxunc.unwrap() as f64 * zp_scaling_factor) as f32;
         assert!(
             (expected_flux - fp_negative_det.psf_flux.unwrap()).abs() < 1e-6,
             "Expected flux: {}, PSF flux: {}",
@@ -1481,8 +1748,10 @@ mod tests {
         assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
         assert!(
             (fp_positive_det.snr_psf.unwrap()
-                - fp_positive_det.psf_flux.unwrap().abs() / fp_positive_det.psf_flux_err.unwrap())
-            .abs()
+                / (fp_positive_det.psf_flux.unwrap().abs()
+                    / fp_positive_det.psf_flux_err.unwrap())
+                - 1.0)
+                .abs()
                 < 1e-6
         );
         assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
@@ -1490,20 +1759,18 @@ mod tests {
         // let's verify that the psf_flux is positive AND that we can recover the original magpsf and sigmapsf from the flux and flux_err
         assert!(fp_positive_det.psf_flux.unwrap() > 0.0);
         let (magpsf, sigmapsf) = flux2mag(
-            fp_positive_det.psf_flux.unwrap() / 1e9_f32, // convert back to Jy
-            fp_positive_det.psf_flux_err.unwrap() / 1e9_f32, // convert back to Jy
+            fp_positive_det.psf_flux.unwrap(),
+            fp_positive_det.psf_flux_err.unwrap(),
             ZTF_ZP,
         );
-        assert!((magpsf - 20.801506).abs() < 1e-6);
+        assert!((magpsf - 20.801506).abs() < 1e-5);
         assert!((sigmapsf - 0.3616859).abs() < 1e-6);
         let zp_scaling_factor =
             10f64.powf((ZTF_ZP as f64 - fp_positive_det.fp_hist.magzpsci.unwrap() as f64) / 2.5);
-        let expected_flux = (fp_positive_det.fp_hist.forcediffimflux.unwrap() as f64
-            * 1e9
-            * zp_scaling_factor) as f32;
-        let expected_flux_err = (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() as f64
-            * 1e9
-            * zp_scaling_factor) as f32;
+        let expected_flux =
+            (fp_positive_det.fp_hist.forcediffimflux.unwrap() as f64 * zp_scaling_factor) as f32;
+        let expected_flux_err =
+            (fp_positive_det.fp_hist.forcediffimfluxunc.unwrap() as f64 * zp_scaling_factor) as f32;
         assert!(
             (expected_flux - fp_positive_det.psf_flux.unwrap()).abs() < 1e-6,
             "Expected flux: {}, PSF flux: {}",
@@ -1571,6 +1838,46 @@ mod tests {
     }
 
     #[test]
+    fn test_pre_fp_hists_schema_deserializes() {
+        // Schema 3.3 packet (ZTF23aajjzfg, 2023-05-13): predates the fp_hists field.
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2323428966215015003.avro").unwrap();
+        let mut cache = SchemaCache::default();
+        let alert: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
+        assert_eq!(alert.schemavsn, "3.3");
+        assert_eq!(alert.object_id, "ZTF23aajjzfg");
+        assert_eq!(alert.candid, 2323428966215015003);
+        assert!(alert.fp_hists.is_none());
+        assert_eq!(alert.prv_candidates.unwrap().len(), 16);
+    }
+
+    #[tokio::test]
+    async fn test_process_pre_fp_hists_alert() {
+        let mut worker = ztf_alert_worker().await;
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2323428966215015003.avro").unwrap();
+        let candid = 2323428966215015003;
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+
+        let status = worker.process_alert(&avro_bytes).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": "ZTF23aajjzfg" })
+            .await
+            .unwrap()
+            .expect("alert aux should exist after processing");
+        assert!(aux.fp_hists.is_empty());
+        assert_eq!(aux.prv_candidates.len(), 2);
+        assert_eq!(aux.prv_nondetections.len(), 15);
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+    }
+
+    #[test]
     fn test_tooflag_coerces_every_form_ipac_sends() {
         #[derive(serde::Deserialize)]
         struct Wrapper {
@@ -1584,6 +1891,30 @@ mod tests {
         assert!(parse(r#"{"tooflag": true}"#));
         assert!(parse(r#"{"tooflag": "t"}"#));
         assert!(!parse(r#"{"tooflag": "f"}"#));
+    }
+
+    #[test]
+    fn test_implausible_diffmaglim_drops_only_that_nondetection() {
+        let mut value = read_test_alert_value();
+        let original: ZtfRawAvroAlert = from_value(&value).unwrap();
+        corrupt_first_point(&mut value, "prv_candidates", "diffmaglim", -253.757);
+        let alert: ZtfRawAvroAlert = from_value(&value).unwrap();
+
+        let original_prv_candidates = original.prv_candidates.unwrap();
+        assert!(original_prv_candidates[0].prv_candidate.magpsf.is_none());
+        assert_eq!(alert.prv_candidates.unwrap(), original_prv_candidates[1..]);
+        assert_eq!(alert.fp_hists, original.fp_hists);
+    }
+
+    #[test]
+    fn test_overflowing_forced_flux_drops_only_that_point() {
+        let mut value = read_test_alert_value();
+        let original: ZtfRawAvroAlert = from_value(&value).unwrap();
+        corrupt_first_point(&mut value, "fp_hists", "magzpsci", -247.979);
+        let alert: ZtfRawAvroAlert = from_value(&value).unwrap();
+
+        assert_eq!(alert.fp_hists.unwrap(), original.fp_hists.unwrap()[1..]);
+        assert_eq!(alert.prv_candidates, original.prv_candidates);
     }
 
     #[test]

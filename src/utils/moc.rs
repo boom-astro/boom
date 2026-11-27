@@ -54,12 +54,12 @@ pub fn moc_from_skymap_bytes(bytes: &[u8], credible_level: f64) -> Result<HpxMoc
 }
 
 /// Underflows below UNIQ 4, which [`parse_3d_skymap`] rejects at load.
-fn uniq_to_order(uniq: u64) -> u8 {
+pub(crate) fn uniq_to_order(uniq: u64) -> u8 {
     debug_assert!(uniq >= 4, "invalid UNIQ index: {uniq} (minimum is 4)");
     ((63 - uniq.leading_zeros()) / 2 - 1) as u8
 }
 
-fn uniq_to_ipix(uniq: u64) -> u64 {
+pub(crate) fn uniq_to_ipix(uniq: u64) -> u64 {
     let order = uniq_to_order(uniq) as u32;
     uniq - (1u64 << (2 * order + 2))
 }
@@ -376,6 +376,21 @@ impl CredibleVolumeIndex {
         let dpdv = skymap.pixel_dpdv(row, d_mpc)?;
         Some(self.searched_prob_vol(dpdv))
     }
+
+    pub fn best_searched_prob_vol_between(
+        &self,
+        skymap: &LIGO3dskymap,
+        ra_deg: f64,
+        dec_deg: f64,
+        d_low_mpc: f64,
+        d_high_mpc: f64,
+    ) -> Option<f64> {
+        let row = skymap.ang2pix(ra_deg, dec_deg)?;
+        let (mu, _, _) = skymap.dist_params(row)?;
+        // dP/dV along the line of sight peaks at DISTMU.
+        let dpdv = skymap.pixel_dpdv(row, mu.max(d_low_mpc).min(d_high_mpc))?;
+        Some(self.searched_prob_vol(dpdv))
+    }
 }
 
 /// Deliberately an over-approximation: callers must still run `searched_prob_vol_at`.
@@ -386,25 +401,33 @@ pub fn credible_volume_to_2d_moc(
 ) -> HpxMoc {
     let threshold = idx.density_threshold(credible_level);
 
-    let mut sorted_prob: Vec<f64> = skymap.prob.clone();
-    sorted_prob.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-    let cumsum: Vec<f64> = sorted_prob
+    // Rank by density, not PROB: in a multi-order map a coarse pixel holds more
+    // probability than a fine one of equal density, so ranking by PROB trades the
+    // high-resolution core for the low-resolution outskirts.
+    let density: Vec<f64> = skymap
+        .prob
         .iter()
-        .scan(0.0, |acc, &p| {
-            *acc += p;
-            Some(*acc)
-        })
+        .zip(&skymap.pixel_area_sr)
+        .map(|(&p, &a)| p / a)
         .collect();
-    let cutoff_idx = cumsum.partition_point(|&s| s <= credible_level);
-    let prob_floor_2d = if cutoff_idx < sorted_prob.len() {
-        sorted_prob[cutoff_idx]
-    } else {
-        0.0
-    };
+    let mut by_density: Vec<usize> = (0..density.len()).collect();
+    by_density.sort_unstable_by(|&a, &b| {
+        density[b]
+            .partial_cmp(&density[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut cumsum = 0.0;
+    let density_floor_2d = by_density
+        .iter()
+        .find(|&&row| {
+            cumsum += skymap.prob[row];
+            cumsum > credible_level
+        })
+        .map_or(0.0, |&row| density[row]);
 
     let included = (0..skymap.prob.len())
         .filter(|&row| {
-            if skymap.prob[row] < prob_floor_2d {
+            if density[row] < density_floor_2d {
                 return false;
             }
             // Peak density is at D = DISTMU.
@@ -530,6 +553,16 @@ pub fn moc_from_ascii(input: &str) -> Result<HpxMoc, String> {
 /// before this is trusted over the whole baseline.
 pub fn moc_hpx_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
     use mongodb::bson::doc;
+    Ok(doc! { "$match": moc_hpx_filter(moc)? })
+}
+
+/// The same region test as a `find` filter rather than a pipeline stage.
+///
+/// Combined with a `candidate.jd` bound this is served by the
+/// `{coordinates.hpx, candidate.jd}` index, where the 2dsphere index carries no
+/// time and so scans the whole baseline in the region before filtering by date.
+pub fn moc_hpx_filter(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
+    use mongodb::bson::doc;
 
     // A RangeMOC already holds its coverage as minimal, ordered ranges at
     // Hpx<u64>'s maximum depth, which is HPX_DEPTH, so these are the index
@@ -549,7 +582,35 @@ pub fn moc_hpx_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
         .iter()
         .map(|r| doc! { "coordinates.hpx": { "$gte": r.start as i64, "$lt": r.end as i64 } })
         .collect();
-    Ok(doc! { "$match": { "$or": conditions } })
+    Ok(doc! { "$or": conditions })
+}
+
+/// Depth a cone is covered at. 12 is ~51 arcsec per cell, fine enough that the
+/// approximation costs little next to a search radius of arcminutes or more,
+/// and coarse enough to stay well inside the range limit.
+const CONE_DEPTH: u8 = 12;
+
+/// A MOC covering a cone, for a region-restricted query.
+///
+/// Approximate at the edge by a cell, so it returns a little more than the cone
+/// rather than less: a caller wanting the exact radius still tests separation.
+pub fn moc_from_cone(ra_deg: f64, dec_deg: f64, radius_deg: f64) -> Result<HpxMoc, String> {
+    if !(0.0..=180.0).contains(&radius_deg) || radius_deg <= 0.0 {
+        return Err(format!(
+            "cone radius {radius_deg} is not in (0, 180] degrees"
+        ));
+    }
+    if !(-90.0..=90.0).contains(&dec_deg) {
+        return Err(format!("declination {dec_deg} is outside [-90, 90]"));
+    }
+    Ok(HpxMoc::from_cone(
+        ra_deg.to_radians().rem_euclid(std::f64::consts::TAU),
+        dec_deg.to_radians(),
+        radius_deg.to_radians(),
+        CONE_DEPTH,
+        2,
+        moc::moc::range::CellSelection::All,
+    ))
 }
 
 /// A `$match` stage selecting alerts inside `moc`.
@@ -1284,6 +1345,73 @@ mod tests {
         );
     }
 
+    /// Split every pixel above `min_prob` into its four children at the same
+    /// density, as BAYESTAR's multi-order maps refine the core of a localization.
+    fn refine_core(flat: &LIGO3dskymap, min_prob: f64) -> LIGO3dskymap {
+        let mut m = LIGO3dskymap {
+            uniq: vec![],
+            pixel_area_sr: vec![],
+            prob: vec![],
+            distmu: vec![],
+            distsigma: vec![],
+            distnorm: vec![],
+            max_order: flat.max_order + 1,
+            uniq_to_row: None,
+        };
+        let mut push = |uniq, area, prob, row: usize| {
+            m.uniq.push(uniq);
+            m.pixel_area_sr.push(area);
+            m.prob.push(prob);
+            m.distmu.push(flat.distmu[row]);
+            m.distsigma.push(flat.distsigma[row]);
+            m.distnorm.push(flat.distnorm[row]);
+        };
+        for row in 0..flat.prob.len() {
+            let (uniq, area, prob) = (flat.uniq[row], flat.pixel_area_sr[row], flat.prob[row]);
+            if prob > min_prob {
+                let child_order = uniq_to_order(uniq) as u32 + 1;
+                for j in 0..4 {
+                    let child = (1u64 << (2 * child_order + 2)) + 4 * uniq_to_ipix(uniq) + j;
+                    push(child, area / 4.0, prob / 4.0, row);
+                }
+            } else {
+                push(uniq, area, prob, row);
+            }
+        }
+        m.uniq_to_row = Some(m.uniq.iter().enumerate().map(|(i, &u)| (u, i)).collect());
+        m
+    }
+
+    /// The credible region is a property of the density, so storing the same
+    /// localization at a finer resolution in its core must not move it.
+    #[test]
+    fn test_the_credible_region_does_not_depend_on_pixelization() {
+        let flat =
+            parse_3d_skymap("./data/S240618ah_bayestar.fits").expect("Failed to parse 3D skymap");
+        // Children stay well above the 1e-7 floor CredibleVolumeIndex::build skips below.
+        let multi = refine_core(&flat, 1e-5);
+        assert!(
+            multi.prob.len() > flat.prob.len() + 1000,
+            "the core should have been refined"
+        );
+
+        let flat_idx = CredibleVolumeIndex::build(&flat, 200);
+        let multi_idx = CredibleVolumeIndex::build(&multi, 200);
+        for level in [0.5, 0.9, 0.95] {
+            let from_flat = credible_volume_to_2d_moc(&flat, &flat_idx, level);
+            let from_multi = credible_volume_to_2d_moc(&multi, &multi_idx, level);
+            let differ = from_flat.xor(&from_multi);
+            assert!(
+                differ.is_empty(),
+                "the {level} region moved with the pixelization: {:.3}% of the sky differs \
+                 (flat covers {:.3}%, multi-order {:.3}%)",
+                differ.coverage_percentage() * 100.0,
+                from_flat.coverage_percentage() * 100.0,
+                from_multi.coverage_percentage() * 100.0,
+            );
+        }
+    }
+
     #[test]
     fn test_searched_prob_vol_at_max_density_is_low() {
         let skymap =
@@ -1478,6 +1606,75 @@ mod tests {
             cones.len() > 500,
             "a genuinely broad region should still exceed the cap at the floor, got {} cones",
             cones.len()
+        );
+    }
+
+    /// The stored index for a position, at the depth the ranges are expressed in.
+    fn hpx_at(ra: f64, dec: f64) -> i64 {
+        cdshealpix::nested::get(crate::utils::spatial::HPX_DEPTH)
+            .hash(ra.to_radians(), dec.to_radians()) as i64
+    }
+
+    fn covers(filter: &mongodb::bson::Document, hpx: i64) -> bool {
+        filter.get_array("$or").unwrap().iter().any(|c| {
+            let r = c
+                .as_document()
+                .unwrap()
+                .get_document("coordinates.hpx")
+                .unwrap();
+            hpx >= r.get_i64("$gte").unwrap() && hpx < r.get_i64("$lt").unwrap()
+        })
+    }
+
+    /// The ranges are index bounds, so what matters is which positions fall in
+    /// them, not how many there are.
+    #[test]
+    fn test_a_cone_covers_inside_and_not_outside() {
+        let (ra, dec) = (273.5, -18.7);
+        let filter = moc_hpx_filter(&moc_from_cone(ra, dec, 0.3).unwrap()).unwrap();
+        assert!(covers(&filter, hpx_at(ra, dec)), "centre is not covered");
+        // Just inside, and far outside along the same declination.
+        assert!(
+            covers(&filter, hpx_at(ra + 0.2, dec)),
+            "0.2 deg is not covered"
+        );
+        assert!(
+            !covers(&filter, hpx_at(ra + 3.0, dec)),
+            "3 deg should be outside"
+        );
+        assert!(
+            !covers(&filter, hpx_at(ra, dec + 5.0)),
+            "5 deg should be outside"
+        );
+    }
+
+    /// RA 0 is a seam only if the arithmetic makes it one.
+    #[test]
+    fn test_a_cone_spanning_ra_zero_covers_both_sides() {
+        let filter = moc_hpx_filter(&moc_from_cone(0.0, 10.0, 0.5).unwrap()).unwrap();
+        assert!(covers(&filter, hpx_at(0.2, 10.0)), "east of the seam");
+        assert!(covers(&filter, hpx_at(359.8, 10.0)), "west of the seam");
+        assert!(
+            !covers(&filter, hpx_at(180.0, 10.0)),
+            "the far side is not in the cone"
+        );
+    }
+
+    #[test]
+    fn test_a_cone_rejects_an_impossible_radius() {
+        assert!(moc_from_cone(10.0, 10.0, 0.0).is_err());
+        assert!(moc_from_cone(10.0, 10.0, -1.0).is_err());
+        assert!(moc_from_cone(10.0, 100.0, 1.0).is_err());
+    }
+
+    /// The stage is the filter under a `$match`, so the two cannot drift.
+    #[test]
+    fn test_the_stage_wraps_the_filter() {
+        let moc = moc_from_cone(120.0, 30.0, 0.2).unwrap();
+        let stage = moc_hpx_stage(&moc).unwrap();
+        assert_eq!(
+            stage.get_document("$match").unwrap(),
+            &moc_hpx_filter(&moc).unwrap()
         );
     }
 }

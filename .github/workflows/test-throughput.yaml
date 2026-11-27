@@ -4,10 +4,18 @@ on:
   push:
     branches: ["main"]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "frontend/**"
+      - "config/grafana/**"
+      - "**/*.md"
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # Other labels must not cancel a running test.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}${{ github.event.label.name != 'skip-throughput' && github.event.label && format('-{0}', github.run_id) || '' }}
   # Only PR runs are superseded; main keeps one run, and one status, per commit.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -27,11 +35,37 @@ env:
   BOOM_GPU__ENABLED: 'false'
 
 jobs:
+  merged-pr-labels:
+    name: Check the merged pull request labels
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      skip: ${{ steps.labels.outputs.skip }}
+    steps:
+      - id: labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[].labels[].name' | grep -qx skip-throughput; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: Run throughput test
+    needs: merged-pr-labels
+    if: >-
+      !cancelled() && needs.merged-pr-labels.outputs.skip != 'true' &&
+      (github.event_name != 'pull_request' ||
+      (!contains(github.event.pull_request.labels.*.name, 'skip-throughput') &&
+      (!github.event.label || github.event.label.name == 'skip-throughput')))
     runs-on: ubuntu-latest
     permissions: write-all
-    timeout-minutes: 30
+    # The cap catches a hang, and leaves room for a slow runner rather than
+    # cancelling one.
+    timeout-minutes: 60
     strategy:
       matrix:
         cutouts_storage_type: [mongo, s3]
@@ -52,14 +86,33 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
+      # In the registry rather than the Actions cache, whose 10 GB cap this
+      # build's export was filling at the cost of the cargo caches.
+      - name: Choose the layer cache
+        env:
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          cache=ghcr.io/${{ github.repository }}-cache
+          base=$(docker buildx imagetools inspect "$(awk '$1 == "FROM" && $4 == "base" { print $2 }' Dockerfile)" --format '{{.Manifest.Digest}}')
+          deps=deps-$({ cat Cargo.lock Cargo.toml apache-avro-macros/Cargo.toml Dockerfile; ls src/bin; echo "$base"; } | sha256sum | cut -c1-16)
+          {
+            echo 'BAKE_CACHE<<EOF'
+            echo "*.cache-from=type=registry,ref=$cache:$deps"
+            echo "*.cache-from=type=registry,ref=$cache:throughput"
+            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+              echo "*.cache-to=type=registry,ref=$cache:throughput,mode=max"
+            fi
+            if [ "$FORK" != true ] && ! docker buildx imagetools inspect "$cache:$deps" > /dev/null 2>&1; then
+              echo "*.cache-to=type=registry,ref=$cache:$deps,mode=max,ignore-error=true"
+            fi
+            echo EOF
+          } >> "$GITHUB_ENV"
       - name: Build & Cache Docker images
         uses: docker/bake-action@v2
         with:
           workdir: ./tests/throughput
           load: true
-          set: |
-            *.cache-to=type=gha,mode=max
-            *.cache-from=type=gha
+          set: ${{ env.BAKE_CACHE }}
         env:
           PWD: ${{ github.workspace }}
           BOOM_REPO_ROOT: ${{ github.workspace }}
@@ -70,8 +123,19 @@ jobs:
         run: |
           mkdir -p ./data/alerts
           wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -O ./data/alerts/BOOM.NED.json.gz
-      - name: Download auxiliary ZTF alerts from Caltech Box
-        run: wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+      - name: Download auxiliary ZTF alerts
+        run: wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/boom_throughput.ZTF_alerts_aux.dump.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+      # Seeded from our own release so a run does not depend on ztf.uw.edu being
+      # up; the producer downloads from there only when this directory is empty.
+      - name: Seed the alerts the producer replays
+        run: |
+          dir=./data/alerts/ztf/public/20250311
+          mkdir -p "$dir"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/ztf_public.tar.gz \
+            "https://github.com/boom-astro/boom/releases/download/test-data-v1/ztf_public_20250311.tar.gz"
+          tar -xzf /tmp/ztf_public.tar.gz -C "$dir" --exclude='._*'
+          rm -f /tmp/ztf_public.tar.gz
+          echo "Seeded $(find "$dir" -maxdepth 1 -name '*.avro' | wc -l | tr -d ' ') alerts"
       - name: Run test
         run: |
           uv run tests/throughput/run.py \
@@ -94,7 +158,7 @@ jobs:
       contents: read
       actions: read # gh run list + cross-run artifact download
     needs: test
-    if: github.event_name == 'pull_request'
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.test.result == 'success' }}
     steps:
       - uses: actions/checkout@v4
       - name: Download Mongo logs
@@ -119,6 +183,9 @@ jobs:
           # the last few successful main runs, and link every run it covers.
           links=()
           while read -r run_id; do
+            if [ ${#links[@]} -ge "$BASELINE_RUNS" ]; then
+              break
+            fi
             downloaded=0
             for type in mongo s3; do
               if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
@@ -133,7 +200,7 @@ jobs:
             fi
           done < <(gh run list --repo "$GITHUB_REPOSITORY" \
             --workflow test-throughput.yaml --branch main --status success \
-            --limit "$BASELINE_RUNS" --json databaseId --jq '.[].databaseId')
+            --limit 30 --json databaseId --jq '.[].databaseId')
           if [ ${#links[@]} -eq 0 ]; then
             echo "link=_no successful main run found_" >> "$GITHUB_OUTPUT"
           else

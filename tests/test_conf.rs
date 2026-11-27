@@ -51,6 +51,12 @@ fn test_load_workers_config() {
         ztf_worker_config.filter.reference_night,
         Some(chrono::NaiveDate::from_ymd_opt(2026, 3, 16).unwrap())
     );
+    assert_eq!(ztf_worker_config.filter.reference_window_days, 1);
+    let winter_worker_config = config
+        .workers
+        .get(&boom::utils::enums::Survey::Winter)
+        .unwrap();
+    assert_eq!(winter_worker_config.filter.reference_window_days, 30);
 }
 
 #[test]

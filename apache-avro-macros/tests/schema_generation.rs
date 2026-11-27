@@ -3,14 +3,15 @@
 mod tests {
     use apache_avro::schema::derive::AvroSchemaComponent;
     use apache_avro::{
-        AvroResult, AvroSchema, Writer,
+        AvroResult, AvroSchema, Reader, Writer,
         error::Details,
+        from_value,
         schema::Schema,
         to_value,
         types::{Record, Value},
     };
     use apache_avro_macros::serdavro;
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
     use std::io::Write;
 
     pub trait SerdavroWriter {
@@ -181,5 +182,29 @@ mod tests {
             .append_serdavro(&enum_instance)
             .expect("Failed to append serdavro");
         let _ = writer.into_inner().expect("Failed to get inner writer");
+    }
+
+    #[test]
+    fn avro_schema_enum_honors_rename_all() {
+        #[serdavro]
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        #[serde(rename_all = "UPPERCASE")]
+        enum Survey {
+            Ztf,
+            #[serde(rename = "wntr")]
+            Winter,
+        }
+
+        let schema = Survey::get_schema();
+        let Schema::Enum(enum_schema) = &schema else {
+            panic!("Expected enum schema");
+        };
+        assert_eq!(enum_schema.symbols, vec!["ZTF", "wntr"]);
+
+        let mut writer = Writer::new(&schema, Vec::new());
+        writer.append_ser(Survey::Winter).unwrap();
+        let encoded = writer.into_inner().unwrap();
+        let value = Reader::new(&encoded[..]).unwrap().next().unwrap().unwrap();
+        assert_eq!(from_value::<Survey>(&value).unwrap(), Survey::Winter);
     }
 }
