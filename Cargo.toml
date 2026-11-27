@@ -55,7 +55,7 @@ reqwest = { version = "0.13.3", features = ["form", "json", "stream"] }
 # CPU-only Gaussian-process light-curve fits, stored under `gp_fit` by the ZTF enrichment worker.
 rust-gp = { git = "https://github.com/frenbox/rust-gp", rev = "1cc84cc0508798665b023d772c537e0afc9b29cb" }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 serde_with = { version = "3.20.0", features = ["base64"] }
 sha2 = "0.11.0"
 tempfile = "3.27.0"
