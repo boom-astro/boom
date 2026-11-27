@@ -5,6 +5,7 @@ mod base;
 mod decam;
 mod lsst;
 pub mod models;
+mod roman;
 pub mod version;
 mod winter;
 mod ztf;
@@ -18,6 +19,10 @@ pub use decam::{
 pub use lsst::{
     create_lsst_alert_pipeline, lsst_alert_properties, LsstAlertForEnrichment, LsstAlertProperties,
     LsstEnrichmentWorker, LsstMatch, LsstPhotometry, LsstSurveyMatches,
+};
+pub use roman::{
+    create_roman_alert_pipeline, RomanAlertForEnrichment, RomanAlertProperties,
+    RomanEnrichmentWorker, RomanPhotometry,
 };
 pub use winter::{
     create_winter_alert_pipeline, WinterAlertForEnrichment, WinterAlertProperties,

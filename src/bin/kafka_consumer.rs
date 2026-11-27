@@ -3,7 +3,7 @@ use boom::{
     conf::{load_dotenv, AppConfig, KafkaConsumerConfig},
     kafka::{
         AlertConsumer, ArgusAlertConsumer, AskapAlertConsumer, DecamAlertConsumer,
-        LsstAlertConsumer, StartDate, WinterAlertConsumer, ZtfAlertConsumer,
+        LsstAlertConsumer, RomanAlertConsumer, StartDate, WinterAlertConsumer, ZtfAlertConsumer,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -212,6 +212,16 @@ async fn run(
             .await
         }
         Survey::Argus => consume_argus_lanes(&args, start, &date_label).await,
+        Survey::Roman => {
+            consume_with(
+                RomanAlertConsumer::new(None),
+                &args,
+                start,
+                &date_label,
+                None,
+            )
+            .await
+        }
     }
 
     if let Some(meter_provider) = meter_provider {

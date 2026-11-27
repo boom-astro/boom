@@ -325,14 +325,14 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
-                .service(routes::surveys::tracks::get_tracks),
+                .service(routes::tracks::get_all_tracks),
         )
         .await;
         let list = |query: String| {
             let (app, ids) = (&app, &ids);
             async move {
                 let req = test::TestRequest::get()
-                    .uri(&format!("/surveys/ztf/tracks?{query}"))
+                    .uri(&format!("/tracks?{query}"))
                     .to_request();
                 let resp = test::call_service(app, req).await;
                 assert_eq!(resp.status(), StatusCode::OK);

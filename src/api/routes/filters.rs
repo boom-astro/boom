@@ -1,9 +1,9 @@
 use crate::{
     alert::{
         ArgusAliases, ArgusPhotometry, AskapAliases, AskapCandidate, DecamAliases, DecamCandidate,
-        DecamForcedPhot, LsstAliases, LsstCandidate, LsstForcedPhot, WinterAliases,
-        WinterCandidate, WinterPrvCandidate, ZtfAliases, ZtfCandidate, ZtfForcedPhot,
-        ZtfPrvCandidate, ARGUS_SCHEMA,
+        DecamForcedPhot, LsstAliases, LsstCandidate, LsstForcedPhot, RomanAliases, RomanCandidate,
+        RomanForcedPhot, RomanSsMatch, WinterAliases, WinterCandidate, WinterPrvCandidate,
+        ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfPrvCandidate, ARGUS_SCHEMA,
     },
     api::{
         catalogs::{catalog_accessible, WATCHLIST_PREFIX},
@@ -14,7 +14,7 @@ use crate::{
     conf::{AppConfig, CatalogXmatchConfig, FilterWorkerConfig},
     enrichment::{
         ArgusAlertProperties, AskapAlertProperties, DecamAlertProperties, LsstAlertProperties,
-        WinterAlertProperties, ZtfAlertClassifications, ZtfAlertProperties,
+        RomanAlertProperties, WinterAlertProperties, ZtfAlertClassifications, ZtfAlertProperties,
     },
     filter::{
         build_filter_pipeline, find_unknown_field,
@@ -1958,6 +1958,22 @@ pub struct AskapAlertToFilter {
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+/// ROMAN data available at filtering time
+pub struct RomanAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: RomanCandidate,
+    pub ss_matches: Vec<RomanSsMatch>,
+    pub properties: RomanAlertProperties,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<RomanCandidate>,
+    pub fp_hists: Vec<RomanForcedPhot>,
+    pub aliases: RomanAliases,
+}
+
 fn filter_schema(survey: &Survey) -> apache_avro::Schema {
     match survey {
         Survey::Ztf => ZtfAlertToFilter::get_schema(),
@@ -1966,6 +1982,7 @@ fn filter_schema(survey: &Survey) -> apache_avro::Schema {
         Survey::Decam => DecamAlertToFilter::get_schema(),
         Survey::Askap => AskapAlertToFilter::get_schema(),
         Survey::Argus => ARGUS_FILTER_SCHEMA.clone(),
+        Survey::Roman => RomanAlertToFilter::get_schema(),
     }
 }
 
@@ -2393,6 +2410,25 @@ mod schema_tests {
             !s.contains("\"fp_hists\""),
             "WINTER has no forced photometry; schema should omit fp_hists: {s}"
         );
+    }
+
+    #[test]
+    fn roman_filter_schema_exposes_psf_photometry_and_ss_matches() {
+        let s = schema_str::<RomanAlertToFilter>();
+        for field in [
+            "\"prv_candidates\"",
+            "\"fp_hists\"",
+            "\"magpsf\"",
+            "\"snr_psf\"",
+            "\"ss_matches\"",
+            "\"designation\"",
+            "\"f146\"",
+        ] {
+            assert!(
+                s.contains(field),
+                "ROMAN filter schema missing {field}: {s}"
+            );
+        }
     }
 }
 

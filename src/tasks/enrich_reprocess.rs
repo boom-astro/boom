@@ -30,8 +30,8 @@ use crate::conf::AppConfig;
 use crate::enrichment::{
     models::{SharedModelPool, SharedModels},
     ArgusEnrichmentWorker, AskapEnrichmentWorker, DecamEnrichmentWorker, EnrichmentWorker,
-    EnrichmentWorkerError, LsstEnrichmentWorker, WinterEnrichmentWorker, ZtfEnrichmentWorker,
-    ZtfSubsetWorker,
+    EnrichmentWorkerError, LsstEnrichmentWorker, RomanEnrichmentWorker, WinterEnrichmentWorker,
+    ZtfEnrichmentWorker, ZtfSubsetWorker,
 };
 use crate::utils::{
     enums::Survey,
@@ -413,6 +413,7 @@ pub async fn run(
                     Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>,
                     Survey::Askap => run_enrich_only::<AskapEnrichmentWorker>,
                     Survey::Argus => run_enrich_only::<ArgusEnrichmentWorker>,
+                    Survey::Roman => run_enrich_only::<RomanEnrichmentWorker>,
                 };
                 let result = run_worker(
                     receiver,
@@ -739,6 +740,7 @@ mod tests {
             Survey::Decam,
             Survey::Winter,
             Survey::Askap,
+            Survey::Roman,
         ] {
             assert!(
                 params(survey.clone(), Selection::All)
@@ -759,7 +761,13 @@ mod tests {
 
     #[test]
     fn stale_is_refused_for_a_survey_that_does_not_stamp() {
-        for survey in [Survey::Lsst, Survey::Decam, Survey::Winter, Survey::Askap] {
+        for survey in [
+            Survey::Lsst,
+            Survey::Decam,
+            Survey::Winter,
+            Survey::Askap,
+            Survey::Roman,
+        ] {
             let message = params(survey.clone(), Selection::Stale)
                 .validate_params()
                 .expect_err("stale must be refused for a survey that does not stamp");

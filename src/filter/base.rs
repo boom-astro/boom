@@ -3,7 +3,8 @@ use crate::{
     conf::{self, AppConfig},
     filter::{
         build_argus_filter_pipeline, build_askap_filter_pipeline, build_decam_filter_pipeline,
-        build_lsst_filter_pipeline, build_winter_filter_pipeline, build_ztf_filter_pipeline,
+        build_lsst_filter_pipeline, build_roman_filter_pipeline, build_winter_filter_pipeline,
+        build_ztf_filter_pipeline,
     },
     scheduler::{count_filtered_alerts, record_kafka_alert_published, record_worker_retry},
     utils::{
@@ -440,6 +441,7 @@ fn candidate_fields(survey: &Survey) -> std::collections::HashSet<String> {
         Survey::Decam => crate::alert::DecamCandidate::get_schema(),
         Survey::Askap => crate::alert::AskapCandidate::get_schema(),
         Survey::Argus => return crate::alert::argus_candidate_fields(),
+        Survey::Roman => crate::alert::RomanCandidate::get_schema(),
     };
     match schema {
         Schema::Record(record) => record.fields.iter().map(|f| f.name.clone()).collect(),
@@ -878,6 +880,7 @@ pub async fn build_filter_pipeline(
         Survey::Winter => build_winter_filter_pipeline(pipeline, permissions).await?,
         Survey::Askap => build_askap_filter_pipeline(pipeline, permissions).await?,
         Survey::Argus => build_argus_filter_pipeline(pipeline, permissions).await?,
+        Survey::Roman => build_roman_filter_pipeline(pipeline, permissions).await?,
     };
     Ok(pipeline)
 }
@@ -1400,6 +1403,7 @@ mod tests {
             posterior: 0.95,
             z: Some(0.009727),
             z_err: Some(0.000_01),
+            z_type: None,
             dist_mpc: Some(40.0),
             dist_mpc_method: Some("zIndependent".to_string()),
             a_arcsec: 60.0,

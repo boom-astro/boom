@@ -336,7 +336,7 @@ pub fn member_of(d: &Detection) -> Option<Member> {
 
 fn legacy_member_id(survey: &Survey, alert_id: i64) -> i64 {
     match survey {
-        Survey::Ztf | Survey::Lsst | Survey::Askap | Survey::Argus => alert_id,
+        Survey::Ztf | Survey::Lsst | Survey::Askap | Survey::Argus | Survey::Roman => alert_id,
         Survey::Decam => DECAM_IDS.wrapping_add(alert_id),
         Survey::Winter => WINTER_IDS.wrapping_add(alert_id),
     }
@@ -354,7 +354,7 @@ fn legacy_member(id: i64) -> Member {
 /// `None` for ZTF, the default site of every fit.
 pub fn survey_site(survey: &Survey) -> Option<Site> {
     match survey {
-        Survey::Ztf | Survey::Askap | Survey::Argus => None,
+        Survey::Ztf | Survey::Askap | Survey::Argus | Survey::Roman => None,
         Survey::Lsst => Some(RUBIN),
         Survey::Decam => Some(DECAM),
         Survey::Winter => Some(WINTER),
@@ -1118,6 +1118,7 @@ pub struct TrackQuery {
     pub max_rms_ratio: Option<f64>,
     pub min_neo_score: Option<f64>,
     pub min_last_jd: Option<f64>,
+    pub survey: Option<Survey>,
 }
 
 impl TrackQuery {
@@ -1154,6 +1155,9 @@ impl TrackQuery {
         }
         if let Some(min_last_jd) = self.min_last_jd {
             filter.insert("last_jd", doc! { "$gte": min_last_jd });
+        }
+        if let Some(survey) = &self.survey {
+            filter.insert("member_surveys", survey.as_str());
         }
         filter
     }
@@ -1524,6 +1528,7 @@ pub(crate) mod tests {
             max_rms_ratio: Some(4.0),
             min_neo_score: None,
             min_last_jd: None,
+            survey: None,
         };
         let filter = query.filter();
         assert_eq!(filter.keys().next().map(String::as_str), Some("updated_at"));

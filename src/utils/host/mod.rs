@@ -37,13 +37,14 @@ mod error;
 mod likelihood;
 mod photometry;
 mod prior;
+mod ps1;
 mod sersic;
 mod types;
 
 pub use associate::{associate_host, AssociationConfig, AssociationResult};
 pub use association::{HostGalaxyAssociation, HostSummary, StoredHostCandidate};
 pub use catalog::{collect_galaxies, galaxy_from_legacy, galaxy_from_ned, LS_DR10, LS_DR9, NED};
-pub use config::HostGalaxyConfig;
+pub use config::{HostGalaxyConfig, Ps1FallbackConfig};
 pub use dlr::{compute_dlr, DlrResult};
 pub use ellipse::Ellipse;
 pub use error::HostError;
@@ -90,6 +91,13 @@ pub async fn associate_with_photometry(
     db: &mongodb::Database,
 ) -> Option<HostGalaxyAssociation> {
     let mut association = associate_from_xmatches(ra, dec, xmatches, config)?;
+    if association.best_host.is_none() {
+        if let Some(fallback) =
+            ps1::associate(ra, dec, xmatches, config, survey, object_id, db).await
+        {
+            association = fallback;
+        }
+    }
     add_spectrum_at_host_center(
         &mut association,
         xmatches,
@@ -127,7 +135,7 @@ async fn add_spectrum_at_host_center(
     let Some(best) = association.best_host.as_ref() else {
         return;
     };
-    if !catalog::redshift_is_photometric(best.catalog.as_deref(), best.z, best.z_err, config) {
+    if !catalog::lacks_spectroscopic_redshift(best.z, best.z_type.as_deref()) {
         return;
     }
     let (ra, dec, radius) = (best.ra, best.dec, config.spectrum_match_arcsec);
@@ -164,6 +172,7 @@ async fn add_spectrum_at_host_center(
     {
         host.z = z;
         host.z_err = z_err;
+        host.z_type = Some(catalog::SPECTROSCOPIC.to_string());
     }
 }
 

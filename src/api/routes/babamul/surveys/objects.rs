@@ -61,6 +61,8 @@ struct ObjHost {
     dec: f64,
     z: Option<f64>,
     z_err: Option<f64>,
+    #[serde(default)]
+    z_type: Option<String>,
     dist_mpc: Option<f64>,
     dist_mpc_method: Option<String>,
     sep_arcsec: f64,
@@ -77,6 +79,7 @@ impl From<&StoredHostCandidate> for ObjHost {
             dec: host.dec,
             z: host.z,
             z_err: host.z_err,
+            z_type: host.z_type.clone(),
             dist_mpc: host.dist_mpc,
             dist_mpc_method: host.dist_mpc_method.clone(),
             sep_arcsec: host.sep_arcsec,

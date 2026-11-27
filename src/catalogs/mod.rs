@@ -38,6 +38,7 @@ pub const STATE_COLLECTION: &str = "catalog_state";
 
 /// The task type whose runs populate these collections.
 const TASK_TYPE_CATALOG_INGEST: &str = crate::tasks::catalog_ingest::TASK_TYPE;
+pub(crate) const PS1_HOSTS_COLLECTION: &str = "PS1_DR2_HOSTS";
 
 /// Which reader turns this catalog's source files into documents.
 ///
@@ -72,6 +73,7 @@ pub enum Reader {
     Vsx,
     /// Pan-STARRS otmo, parquet partitions.
     PanStarrs,
+    Ps1Hosts,
     /// Legacy Survey DR9, parquet merged from the published sweep and photo-z
     /// FITS pairs.
     LsDr9,
@@ -243,6 +245,16 @@ pub const CATALOGS: &[CatalogDef] = &[
         aliases: &["PS1_DR1"],
     },
     CatalogDef {
+        id: "panstarrs-hosts",
+        collection: PS1_HOSTS_COLLECTION,
+        title: "Pan-STARRS DR2 Host Galaxies",
+        description:
+            "Staged DR2 stack sizes and PS1-STRM classifications and photo-zs, joined by objID.",
+        reader: Reader::Ps1Hosts,
+        source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
         id: "lsdr9",
         collection: "LSDR9",
         title: "Legacy Survey DR9 (north)",
@@ -377,7 +389,7 @@ pub async fn warn_on_empty_crossmatch_catalogs(
     }
 }
 
-/// Collection names crossmatch config actually references, across all surveys.
+/// Collection names the alert pipeline queries across all surveys.
 ///
 /// Separate from [`declared`] because the two answer different questions now:
 /// `declared` is "what did config ask for", this is "what will the alert
@@ -391,6 +403,9 @@ pub fn crossmatched(config: &crate::conf::AppConfig) -> Vec<String> {
         .map(|entry| entry.catalog.clone())
         .filter(|name| !name.starts_with(crate::api::catalogs::WATCHLIST_PREFIX))
         .collect();
+    if config.host_galaxy.enabled && config.host_galaxy.ps1_fallback.is_some() {
+        names.push(PS1_HOSTS_COLLECTION.to_string());
+    }
     names.sort_unstable();
     names.dedup();
     names
@@ -398,9 +413,7 @@ pub fn crossmatched(config: &crate::conf::AppConfig) -> Vec<String> {
 
 /// Which catalogs this deployment should hold.
 ///
-/// Derived from `crossmatch.<survey>[].catalog`, because that is where a
-/// catalog is actually put to use -- a deployment that crossmatches against
-/// NED needs NED, and having to say so twice is how two lists drift apart.
+/// Derived from crossmatch and host-association config.
 ///
 /// Entries are returned as slugs where the name maps to a known catalog, and as
 /// the raw collection name where it does not, so an unrecognized name surfaces
@@ -419,22 +432,10 @@ pub fn declared(config: &crate::conf::AppConfig) -> Vec<String> {
         }
     };
 
-    // Sorted for a stable order regardless of the survey map's iteration order,
-    // so the admin page does not reshuffle its rows between requests.
-    let mut from_crossmatch: Vec<&str> = config
-        .crossmatch
-        .values()
-        .flatten()
-        .map(|entry| entry.catalog.as_str())
-        .filter(|name| !name.starts_with(crate::api::catalogs::WATCHLIST_PREFIX))
-        .collect();
-    from_crossmatch.sort_unstable();
-    from_crossmatch.dedup();
-
-    for name in from_crossmatch {
-        match find_by_collection(name) {
+    for name in crossmatched(config) {
+        match find_by_collection(&name) {
             Some(def) => push(def.id.to_string()),
-            None => push(name.to_string()),
+            None => push(name),
         }
     }
     declared
@@ -867,6 +868,7 @@ async fn ingest_file(
         Reader::Galex => Ok(csv::ingest_csv::<types::Galex>(inserter, path).await?),
         Reader::Vsx => Ok(ascii::ingest_ascii::<types::Vsx>(inserter, path).await?),
         Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
+        Reader::Ps1Hosts => Ok(jsonl::ingest_jsonl::<types::Ps1Host>(inserter, path).await?),
         Reader::LsDr9 => Ok(arrow::ingest_parquet::<types::LsDr9>(inserter, path).await?),
         Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
         Reader::Erass1 => Ok(arrow::ingest_parquet::<types::Erass1>(inserter, path).await?),
@@ -1683,7 +1685,7 @@ mod source_tests {
             .collect();
         // lspsc is an export of BOOM's own copy and the DESI DR1 dwarfs are not
         // published: neither can be fetched, and their files must not be deleted.
-        assert_eq!(staged, vec!["desi-dr1-dwarfs", "lspsc"]);
+        assert_eq!(staged, vec!["desi-dr1-dwarfs", "panstarrs-hosts", "lspsc"]);
     }
 
     #[test]

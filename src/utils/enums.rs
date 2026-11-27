@@ -32,6 +32,8 @@ pub enum Survey {
     Askap,
     #[serde(alias = "argus")]
     Argus,
+    #[serde(alias = "roman")]
+    Roman,
 }
 
 impl Survey {
@@ -43,6 +45,7 @@ impl Survey {
             Survey::Winter => "WINTER",
             Survey::Askap => "ASKAP",
             Survey::Argus => "ARGUS",
+            Survey::Roman => "ROMAN",
         }
     }
 
@@ -56,6 +59,7 @@ impl Survey {
             Survey::Lsst | Survey::Decam => Tz::America__Santiago,
             Survey::Askap => Tz::Australia__Perth,
             Survey::Argus => Tz::America__Chicago,
+            Survey::Roman => Tz::UTC,
         }
     }
 

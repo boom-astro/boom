@@ -1042,6 +1042,25 @@ impl super::arrow::FromRecordBatch for PanStarrs {
 
 impl HasCoordinates for PanStarrs {}
 
+/// DR2 stack morphology joined to PS1-STRM by objID.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Ps1Host {
+    #[serde(rename = "_id")]
+    pub id: i64,
+    pub ra: f64,
+    pub dec: f64,
+    #[serde(rename = "rKronRad")]
+    pub kron_radius_arcsec: f64,
+    #[serde(rename = "rExtNSigma")]
+    pub extendedness_sigma: f64,
+    pub strm_class: String,
+    pub strm_prob_galaxy: f64,
+    pub strm_z_phot: Option<f64>,
+    pub strm_z_phot_err: Option<f64>,
+}
+
+impl HasCoordinates for Ps1Host {}
+
 // ---------------------------------------------------------------------------
 // Legacy Survey DR9 -- parquet, merged from the published sweep and photo-z
 // FITS pairs by boompy

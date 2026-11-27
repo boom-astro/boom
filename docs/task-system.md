@@ -201,6 +201,7 @@ later.
 | `backfill_host_galaxy` | Score stored galaxy cross-matches and write `host_galaxy` on `alerts_aux`. |
 | `backfill_hpx` | Write `coordinates.hpx` onto alerts that predate the field, so MOC region queries can find them. |
 | `backfill_track_elements` | Write `orbit.e`, `orbit.q`, `rms_ratio` and `flags` onto tracks stored before they were. |
+| `publish_tracks` | Run the filters reading `track` over given tracks, whatever their age, and publish what passes on each survey's results topic. |
 | `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
 | `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. See [alert-processing.md](./alert-processing.md). |
 | `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |

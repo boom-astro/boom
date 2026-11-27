@@ -50,7 +50,7 @@ pub struct WinterAlertForFilter {
 
 /// Pipeline used to fetch full WINTER alert data (candidate + lightcurve) to
 /// build the alert packets emitted after filtering.
-fn create_winter_filter_alert_pipeline() -> Vec<Document> {
+pub fn create_winter_filter_alert_pipeline() -> Vec<Document> {
     vec![
         doc! {
             "$match": {

@@ -291,7 +291,7 @@ async fn build_cutout_storage(
                     ))?;
             let cache = CutoutCache::new(redis_conn, s3_conf.cache.ttl_seconds, key_prefix.clone());
 
-            let compress_stamps = matches!(survey, Survey::Lsst);
+            let compress_stamps = matches!(survey, Survey::Lsst | Survey::Roman);
             CutoutStorage::from_s3(
                 rustfs_client,
                 bucket_name,
@@ -1971,6 +1971,9 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 
     if let Err(e) = app_config.validate_secrets() {
         return Err(BoomConfigError::InvalidSecretError(e));
+    }
+    if let Some(fallback) = &app_config.host_galaxy.ps1_fallback {
+        fallback.validate().map_err(config::ConfigError::Message)?;
     }
 
     // A misspelled crossmatch catalog does not fail at query time -- it matches

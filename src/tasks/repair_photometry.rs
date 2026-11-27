@@ -90,6 +90,7 @@ fn timeseries_fields(survey: &Survey) -> &'static [&'static str] {
         Survey::Winter => &["prv_candidates"],
         Survey::Askap => &["prv_candidates", "fp_hists"],
         Survey::Argus => &[],
+        Survey::Roman => &["prv_candidates", "fp_hists"],
     }
 }
 
@@ -547,6 +548,7 @@ mod tests {
             Survey::Decam,
             Survey::Winter,
             Survey::Askap,
+            Survey::Roman,
         ] {
             let path = format!(
                 "{}/src/alert/{}.rs",

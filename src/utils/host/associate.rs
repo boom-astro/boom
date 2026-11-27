@@ -158,6 +158,7 @@ mod tests {
             pa_deg: pa,
             redshift: None,
             redshift_err: None,
+            redshift_type: None,
             dist_mpc: None,
             dist_mpc_method: None,
             mag: None,

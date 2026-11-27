@@ -52,6 +52,7 @@ pub mod move_ztf_bogus;
 pub mod mpcorb_ingest;
 pub mod prepare_catalog;
 pub mod propagate_orbits;
+pub mod publish_tracks;
 pub mod repair_photometry;
 pub mod reprocess_crossmatch;
 pub mod sso_baselines;
@@ -104,6 +105,7 @@ pub enum TaskType {
     BackfillHostGalaxy,
     BackfillHpx,
     BackfillTrackElements,
+    PublishTracks,
     RepairPhotometry,
     ReprocessCrossmatch,
     MigrateSnr,
@@ -115,7 +117,7 @@ pub enum TaskType {
 }
 
 impl TaskType {
-    pub const ALL: [TaskType; 22] = [
+    pub const ALL: [TaskType; 23] = [
         Self::CatalogIngest,
         Self::StreamKowalskiAlerts,
         Self::CopyCutouts,
@@ -130,6 +132,7 @@ impl TaskType {
         Self::BackfillHostGalaxy,
         Self::BackfillHpx,
         Self::BackfillTrackElements,
+        Self::PublishTracks,
         Self::RepairPhotometry,
         Self::ReprocessCrossmatch,
         Self::MigrateSnr,
@@ -156,6 +159,7 @@ impl TaskType {
             Self::BackfillHostGalaxy => backfill_host_galaxy::TASK_TYPE,
             Self::BackfillHpx => backfill_hpx::TASK_TYPE,
             Self::BackfillTrackElements => backfill_track_elements::TASK_TYPE,
+            Self::PublishTracks => publish_tracks::TASK_TYPE,
             Self::RepairPhotometry => repair_photometry::TASK_TYPE,
             Self::ReprocessCrossmatch => reprocess_crossmatch::TASK_TYPE,
             Self::MigrateSnr => migrate_snr::TASK_TYPE,
@@ -279,6 +283,18 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         destructive: false,
         params_schema: || schema_of::<backfill_track_elements::BackfillTrackElementsParams>(),
+    },
+    TaskSpec {
+        id: publish_tracks::TASK_TYPE,
+        title: "Publish tracks to the track filters",
+        description: "Run the active filters reading `track` over the alerts of the given \
+                      tracks, whatever their age, and publish what passes on each \
+                      survey's results topic. The linker does this on its own for the tracks \
+                      of the last nights.",
+        // A client receiving an alert again updates the candidate it already has.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<publish_tracks::PublishTracksParams>(),
     },
     TaskSpec {
         id: stream_kowalski_alerts::TASK_TYPE,
@@ -563,6 +579,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate().map_err(TaskError::InvalidParams)
         }
+        publish_tracks::TASK_TYPE => {
+            let parsed: publish_tracks::PublishTracksParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate().map_err(TaskError::InvalidParams)
+        }
         stream_kowalski_alerts::TASK_TYPE => {
             let parsed: stream_kowalski_alerts::StreamKowalskiParams =
                 serde_json::from_value(params.clone())
@@ -697,6 +719,7 @@ pub fn single_flight_key(
             .and_then(|c| c.as_str())
             .map(|catalog| doc! { "catalog": catalog }),
         backfill_track_elements::TASK_TYPE => Some(doc! {}),
+        publish_tracks::TASK_TYPE => Some(doc! {}),
         // One migration of a collection at a time: two concurrent runs would
         // rewrite the same documents with the same pipeline, wasting a large
         // amount of write throughput for no benefit.
@@ -839,6 +862,11 @@ pub async fn dispatch(
             let params = backfill_track_elements::BackfillTrackElementsParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             backfill_track_elements::run(ctx, params).await
+        }
+        publish_tracks::TASK_TYPE => {
+            let params = publish_tracks::PublishTracksParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            publish_tracks::run(ctx, params).await
         }
         stream_kowalski_alerts::TASK_TYPE => {
             let params = stream_kowalski_alerts::StreamKowalskiParams::deserialize(params)

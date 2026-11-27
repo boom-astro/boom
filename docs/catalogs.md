@@ -156,12 +156,45 @@ still resolves to the same catalog definition.
 | `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
 | `vsx` | `VSX` | fixed-width text | 1 | Variability types, magnitudes, epochs and periods for known and suspected variable stars. |
 | `panstarrs` | `PS1_DR2` | parquet | HEALPix partitions | Mean PSF magnitudes in grizy, from the HATS mirror of the DR2 otmo table. Requester-pays S3. Does not include the PS1-STRM `strm_*` columns crossmatch config projects. |
+| `panstarrs-hosts` | `PS1_DR2_HOSTS` | gzipped JSONL, **staged** | one per staged file | DR2 stack radii joined to PS1-STRM for the opt-in host fallback. |
 | `lsdr9` | `LSDR9` | parquet, from FITS pairs | one per `dr9/north` sweep file | Fluxes, Tractor shapes and photo-z posteriors for the BASS+MzLS reduction, which covers the sky DR10's DECam footprint does not reach. Each chunk is one published sweep file merged with its photo-z counterpart. No i-band: DR9 predates it. |
 | `lspsc` | `LSPSC` | gzipped JSONL, **staged** | one per exported chunk | Morphological resolved/unresolved scores for 3.1×10⁹ LS DR10 sources ([Liu et al. 2025](https://arxiv.org/abs/2505.17174)). Upstream is a cone-search API, so BOOM ingests an export of its own copy — see below. |
 | `erass1-main` | `eRASS1_Main` | parquet, from FITS in a tarball | 1 | eROSITA-DE DR1 Main, 930,203 X-ray sources detected in 0.2-2.3 keV, with fluxes, band rates, extent and detection likelihood. German half of the sky only (Galactic longitude 180° to 360°). |
 | `5xmm-dr15` | `5XMM_DR15` | parquet, from FITS | 1 | XMM-Newton serendipitous source table, 818,656 unique sources, with fluxes, hardness ratios, variability and CLASSX classifications. 2 GB decompressed, so it is read memory-mapped. |
 | `2sxps` | `2SXPS` | parquet, from FITS | 1 | Swift-XRT point sources, the 146,768 of the clean subset, with count rates, hardness ratios, fluxes and variability probabilities. |
 | `4fgl-dr4` | `4FGL_DR4` | parquet, from FITS | 1 | Fermi-LAT 14-year catalog, 7,195 gamma-ray sources with 95% error ellipses, fluxes, variability and associations. |
+
+### Pan-STARRS host fallback
+
+Prepare a catalog with one row per Pan-STARRS `objID`. Join
+[DR2 stack measurements](https://outerspace.stsci.edu/spaces/PANSTARRS/pages/298812430/PS1%2BStackObjectAttributes%2Btable%2Bfields)
+to [PS1-STRM](https://stdatu.stsci.edu/hlsp/ps1-strm) by object ID and resolve
+duplicate stack detections when preparing the join. Stage the completed
+`.jsonl.gz` parts in `<catalog data path>/staged/panstarrs-hosts/`. Each line
+uses an integer `_id` for `objID`, stack `ra` and `dec` in degrees,
+`rKronRad` in arcseconds, `rExtNSigma`, `strm_class`, and `strm_prob_galaxy`.
+The `strm_z_phot` and `strm_z_phot_err` fields are optional.
+
+Ingest `panstarrs-hosts` from the admin page. Then enable the fallback in a
+deployment's host association settings. Omitting `ps1_fallback` disables it.
+An empty `ps1_fallback: {}` uses these defaults.
+
+```yaml
+host_galaxy:
+  enabled: true
+  ps1_fallback:
+    radius_arcsec: 45.0
+    min_galaxy_score: 0.70
+    min_extendedness_sigma: 0.0
+    max_dlr: 3.0
+```
+
+The fallback runs when NED-LVS and Legacy leave no accepted host. It uses
+the r-band Kron radius as a circular size proxy in the existing DLR ranker.
+The resulting host carries the catalog and `objID`. A valid STRM photo-z
+carries the `photometric` redshift type, with the usual DESI preference for
+an available spectrum. The score remains the host ranker's uncalibrated
+posterior. The normal Pan-STARRS alert crossmatch has its own settings.
 
 ### Matching within a positional error
 

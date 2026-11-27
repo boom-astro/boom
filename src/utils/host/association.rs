@@ -39,6 +39,8 @@ pub struct StoredHostCandidate {
     pub z: Option<f64>,
     #[serde(default)]
     pub z_err: Option<f64>,
+    #[serde(default)]
+    pub z_type: Option<String>,
     /// Adopted distance in Mpc, redshift-independent only when
     /// `dist_mpc_method` says so.
     pub dist_mpc: Option<f64>,
@@ -119,6 +121,7 @@ impl HostGalaxyAssociation {
                 posterior: c.posterior,
                 z: c.galaxy.redshift,
                 z_err: c.galaxy.redshift_err,
+                z_type: c.galaxy.redshift_type.clone(),
                 dist_mpc: c.galaxy.dist_mpc,
                 dist_mpc_method: c.galaxy.dist_mpc_method.clone(),
                 a_arcsec: c.galaxy.a_arcsec,
@@ -164,6 +167,7 @@ mod tests {
             pa_deg: 0.0,
             redshift: Some(0.004),
             redshift_err: Some(0.000_1),
+            redshift_type: None,
             dist_mpc,
             dist_mpc_method: dist_mpc.map(|_| "zIndependent".to_string()),
             mag: None,
