@@ -332,6 +332,64 @@ pub struct ArchivalRepeatRv {
 
 impl HasCoordinates for ArchivalRepeatRv {}
 
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArchivalSpectrumObject {
+    #[serde(rename = "_id")]
+    id: String,
+    revision: i64,
+    ra: f64,
+    dec: f64,
+    gaia_dr3_source_id: Option<String>,
+    name: Option<String>,
+    spectrum_records: u64,
+    independent_visits: u64,
+    lists: Vec<String>,
+    review_status: Option<String>,
+    next_spectrum_test: Option<String>,
+    gains: Option<ArchiveObjectGains>,
+}
+impl HasCoordinates for ArchivalSpectrumObject {}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+struct ArchiveObjectGains {
+    compared_at_utc: String,
+    first_spectrum_id: Option<String>,
+    new_rv_nights: u32,
+    new_phase_visits: u32,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArchivalSpectrumVisit {
+    #[serde(rename = "_id")]
+    id: String,
+    revision: i64,
+    object_id: String,
+    ra: f64,
+    dec: f64,
+    survey: String,
+    release: String,
+    product: String,
+    visit: Option<String>,
+    mjd: Option<f64>,
+    night: Option<String>,
+    duration: Option<f64>,
+    snr: Option<f64>,
+    rv: Option<f64>,
+    rv_error: Option<f64>,
+    method: Option<String>,
+    frame: Option<String>,
+    redshift: Option<f64>,
+    redshift_error: Option<f64>,
+    quality: Option<mongodb::bson::Document>,
+    details: Option<mongodb::bson::Document>,
+    locator: Option<ArchiveSpectrumLocator>,
+    watchlist_gain: Option<mongodb::bson::Document>,
+}
+impl HasCoordinates for ArchivalSpectrumVisit {}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ArchiveRvComparison {

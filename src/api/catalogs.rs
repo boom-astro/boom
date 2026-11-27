@@ -1,7 +1,9 @@
 /// Functionality for working with analytical data catalogs.
 use crate::{
     api::{db::PROTECTED_COLLECTION_NAMES, routes::users::User},
-    catalogs::ARCHIVAL_REPEAT_RV_COLLECTION,
+    catalogs::{
+        ARCHIVAL_REPEAT_RV_COLLECTION, ARCHIVAL_SPECTRUM_OBJECTS, ARCHIVAL_SPECTRUM_VISITS,
+    },
     conf::AppConfig,
     utils::enums::Survey,
 };
@@ -75,7 +77,7 @@ pub fn is_cone_searchable(catalog_name: &str, config: &AppConfig) -> bool {
             survey_collection_suffix(catalog_name),
             Some("alerts" | "alerts_aux")
         )
-        || catalog_name == ARCHIVAL_REPEAT_RV_COLLECTION
+        || is_spectroscopy_catalog(catalog_name)
         || is_reference_catalog(catalog_name, config)
 }
 
@@ -85,8 +87,15 @@ pub fn is_catalog_queryable(catalog_name: &str, user: &User, config: &AppConfig)
         && (user.is_admin
             || catalog_name.starts_with(WATCHLIST_PREFIX)
             || survey_collection_suffix(catalog_name).is_some()
-            || catalog_name == ARCHIVAL_REPEAT_RV_COLLECTION
+            || is_spectroscopy_catalog(catalog_name)
             || is_reference_catalog(catalog_name, config))
+}
+
+fn is_spectroscopy_catalog(name: &str) -> bool {
+    matches!(
+        name,
+        ARCHIVAL_REPEAT_RV_COLLECTION | ARCHIVAL_SPECTRUM_OBJECTS | ARCHIVAL_SPECTRUM_VISITS
+    )
 }
 
 /// Whether the user may query the catalog AND it exists as a Mongo collection.
@@ -121,13 +130,18 @@ mod tests {
     }
 
     #[test]
-    fn repeat_rv_can_be_queried_without_entering_alert_crossmatching() {
+    fn spectroscopy_can_be_queried_without_entering_alert_crossmatching() {
         let config = test_config_with_crossmatch(&[]);
         let user = user(false, &[]);
-        let name = ARCHIVAL_REPEAT_RV_COLLECTION;
-        assert!(!is_reference_catalog(name, &config));
-        assert!(is_catalog_queryable(name, &user, &config));
-        assert!(is_cone_searchable(name, &config));
+        for name in [
+            ARCHIVAL_REPEAT_RV_COLLECTION,
+            ARCHIVAL_SPECTRUM_OBJECTS,
+            ARCHIVAL_SPECTRUM_VISITS,
+        ] {
+            assert!(!is_reference_catalog(name, &config));
+            assert!(is_catalog_queryable(name, &user, &config));
+            assert!(is_cone_searchable(name, &config));
+        }
     }
 
     #[test]

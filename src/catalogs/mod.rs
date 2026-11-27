@@ -37,6 +37,8 @@ use tracing::instrument;
 pub const STATE_COLLECTION: &str = "catalog_state";
 
 pub const ARCHIVAL_REPEAT_RV_COLLECTION: &str = "Archival_Repeat_RV_v1";
+pub const ARCHIVAL_SPECTRUM_OBJECTS: &str = "Archival_Spectrum_Objects";
+pub const ARCHIVAL_SPECTRUM_VISITS: &str = "Archival_Spectrum_Visits";
 
 /// The task type whose runs populate these collections.
 const TASK_TYPE_CATALOG_INGEST: &str = crate::tasks::catalog_ingest::TASK_TYPE;
@@ -83,6 +85,8 @@ pub enum Reader {
     /// BOOM's own copy.
     Lspsc,
     ArchivalRepeatRv,
+    ArchivalSpectrumObjects,
+    ArchivalSpectrumVisits,
     Erass1,
     FiveXmm,
     TwoSxps,
@@ -289,6 +293,25 @@ pub const CATALOGS: &[CatalogDef] = &[
         description:
             "Ranked repeat-RV candidates from public LAMOST, SDSS, DESI and 4MOST visit metadata.",
         reader: Reader::ArchivalRepeatRv,
+        source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "archival-spectrum-objects",
+        collection: ARCHIVAL_SPECTRUM_OBJECTS,
+        title: "Archival spectroscopy objects",
+        description:
+            "Versioned source inventory and candidates awaiting spectra, with watchlist gains.",
+        reader: Reader::ArchivalSpectrumObjects,
+        source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "archival-spectrum-visits",
+        collection: ARCHIVAL_SPECTRUM_VISITS,
+        title: "Archival spectroscopy visits",
+        description: "Versioned exposure and coadd metadata with archive FITS locators.",
+        reader: Reader::ArchivalSpectrumVisits,
         source: Source::Staged,
         aliases: &[],
     },
@@ -643,6 +666,12 @@ pub async fn add_catalog(
         params.batch_size,
         params.channel_capacity,
     );
+    let inserter = match def.reader {
+        Reader::ArchivalSpectrumObjects | Reader::ArchivalSpectrumVisits => {
+            inserter.with_versioned_updates()
+        }
+        _ => inserter,
+    };
     let mut report = AddCatalogReport {
         catalog: def.id.to_string(),
         collection: def.collection.to_string(),
@@ -753,6 +782,16 @@ pub async fn add_catalog(
             )
             .await
             .map_err(IngestError::from)?;
+        }
+        let index = match def.reader {
+            Reader::ArchivalSpectrumObjects => Some(doc! {"lists": 1, "_id": 1}),
+            Reader::ArchivalSpectrumVisits => Some(doc! {"object_id": 1, "mjd": 1, "_id": 1}),
+            _ => None,
+        };
+        if let Some(keys) = index {
+            crate::utils::db::create_index(&inserter.collection(), keys, false)
+                .await
+                .map_err(IngestError::from)?;
         }
         if !finish_state(&state, def.collection, claim).await? {
             return Err(CatalogError::Preempted {
@@ -902,6 +941,12 @@ async fn ingest_file(
         Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
         Reader::ArchivalRepeatRv => {
             Ok(jsonl::ingest_jsonl::<types::ArchivalRepeatRv>(inserter, path).await?)
+        }
+        Reader::ArchivalSpectrumObjects => {
+            Ok(jsonl::ingest_jsonl::<types::ArchivalSpectrumObject>(inserter, path).await?)
+        }
+        Reader::ArchivalSpectrumVisits => {
+            Ok(jsonl::ingest_jsonl::<types::ArchivalSpectrumVisit>(inserter, path).await?)
         }
         Reader::Erass1 => Ok(arrow::ingest_parquet::<types::Erass1>(inserter, path).await?),
         Reader::FiveXmm => Ok(arrow::ingest_parquet::<types::FiveXmm>(inserter, path).await?),
@@ -1723,7 +1768,9 @@ mod source_tests {
                 "desi-dr1-dwarfs",
                 "panstarrs-hosts",
                 "lspsc",
-                "archival-repeat-rv"
+                "archival-repeat-rv",
+                "archival-spectrum-objects",
+                "archival-spectrum-visits"
             ]
         );
     }

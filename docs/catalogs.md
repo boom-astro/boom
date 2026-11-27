@@ -619,3 +619,19 @@ treated as "already written", so a record whose `_id` is already present is
 re-ingest safe to repeat; they do not make it a way to refresh data. See
 [Re-ingesting a catalog](#re-ingesting-a-catalog).
 
+
+### Archival spectroscopy updates
+
+The `archival-spectrum-visits` and `archival-spectrum-objects` staged catalogs
+are produced by `export_archival_indices.py` in boom-catalogs. The two shard
+families are published under the same immutable revision directory in
+`staged/archival-spectroscopy/`. Run `catalog_ingest` for visits, then objects
+after the visits finish. New chunks resume alongside the prior collection
+contents. Rows use stable IDs and only a higher revision can replace an
+existing row, so a replay cannot roll back newer metadata.
+
+Query `Archival_Spectrum_Objects` for watchlist candidates, including candidates
+with zero spectra. Look up `Archival_Spectrum_Visits` by `object_id` for visit
+and coadd metadata, phase or RV gains when supplied, and FITS locators.
+Multiple rows can share a physical visit. Spectral pixels are fetched from the
+archival locators by clients as needed.
