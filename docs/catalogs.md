@@ -196,6 +196,19 @@ carries the `photometric` redshift type, with the usual DESI preference for
 an available spectrum. The score remains the host ranker's uncalibrated
 posterior. The normal Pan-STARRS alert crossmatch has its own settings.
 
+### Archival radial velocity pilot
+
+Stage the gzip JSONL file at
+`<catalog data path>/staged/archival-rv-pilot/sources-v1.jsonl.gz`.
+`scripts/stage_archival_rv_pilot.py --help` lists the pilot CSV and archive
+locator inputs used to build that file. The file contains matched observations
+and Fermi associations keyed by optical source. Each resolvable spectrum is
+represented by its archive locator.
+
+Run the `catalog_ingest` task with `catalog: archival-rv-pilot`. The task writes
+`Archival_RV_Pilot_v1`, which SkyPortal queries on demand by position. The
+catalog does not need to be in alert crossmatch configuration.
+
 ### Matching within a positional error
 
 X-ray and gamma-ray positions are much less precise than optical ones, and
