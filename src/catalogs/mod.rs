@@ -287,7 +287,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         collection: ARCHIVAL_REPEAT_RV_COLLECTION,
         title: "Archival repeat radial velocity candidates",
         description:
-            "Ranked repeat-RV candidates from public LAMOST, SDSS and DESI visit metadata.",
+            "Ranked repeat-RV candidates from public LAMOST, SDSS, DESI and 4MOST visit metadata.",
         reader: Reader::ArchivalRepeatRv,
         source: Source::Staged,
         aliases: &[],

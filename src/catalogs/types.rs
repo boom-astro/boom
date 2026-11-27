@@ -335,6 +335,8 @@ struct ArchivalRvVisit {
     dec: f64,
     mjd: f64,
     snr: f64,
+    exptime_s: Option<f64>,
+    rv_frame: Option<String>,
     rv_km_s: f64,
     rv_error_km_s: f64,
     effective_error_km_s: f64,

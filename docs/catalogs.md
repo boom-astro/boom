@@ -246,8 +246,9 @@ The `archival-repeat-rv` staged catalog ingests the ranked output from
 `candidates-v1.jsonl.gz` at
 `<catalog data path>/staged/archival-repeat-rv/` and run the catalog ingest
 task. The archive-wide scan reads the completed LAMOST, SDSS, and DESI
-metadata manifest and keeps archive FITS locators for the best pair in each
-candidate.
+metadata manifest and optionally a normalized public 4MOST visit export. It
+keeps archive FITS locators, RV frame and exposure duration where available
+for the best pair in each candidate.
 
 Authenticated BOOM users can query `Archival_Repeat_RV_v1` with
 `POST /queries/find` or `POST /queries/cone_search`. For example:
