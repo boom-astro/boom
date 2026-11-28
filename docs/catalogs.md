@@ -163,6 +163,7 @@ still resolves to the same catalog definition.
 | `5xmm-dr15` | `5XMM_DR15` | parquet, from FITS | 1 | XMM-Newton serendipitous source table, 818,656 unique sources, with fluxes, hardness ratios, variability and CLASSX classifications. 2 GB decompressed, so it is read memory-mapped. |
 | `2sxps` | `2SXPS` | parquet, from FITS | 1 | Swift-XRT point sources, the 146,768 of the clean subset, with count rates, hardness ratios, fluxes and variability probabilities. |
 | `4fgl-dr4` | `4FGL_DR4` | parquet, from FITS | 1 | Fermi-LAT 14-year catalog, 7,195 gamma-ray sources with 95% error ellipses, fluxes, variability and associations. |
+| `regalade` | `REGALADE_v2` | parquet, from slices of one FITS table | 72 slices of 1M rows | 71.5 million galaxies within 2000 Mpc with distances, redshifts, stellar masses, ellipses and optical/WISE magnitudes, compiled for transient host identification ([Tranin et al. 2026](https://arxiv.org/abs/2508.13267)). See below. |
 
 ### Pan-STARRS host fallback
 
@@ -208,6 +209,24 @@ the semi-major axis of the 95% ellipse, a circle that contains the ellipse; the
 ellipse itself (`Conf_95_SemiMajor`, `Conf_95_SemiMinor`, `Conf_95_PosAng`, in
 degrees) is projected so a filter can test containment. The 90 4FGL sources
 without an ellipse, 81 of them extended, are never matched.
+
+### REGALADE
+
+REGALADE v2 is published as a single 11.6 GB FITS table on Google Drive, linked
+from [htranin/regalade](https://github.com/htranin/regalade). Drive serves byte
+ranges, so a chunk is a slice of a million rows fetched on its own and given a
+FITS header of its own; nothing ever holds the whole file.
+
+Names are not unique: residual duplicates of one galaxy, with different
+distances, are both kept. `_id` is therefore the row's position in the file,
+which is only meaningful for that file, so the downloader pins the table's
+`DATE-HDU` and fails the ingest if the file has been replaced. A new release
+goes in a new collection.
+
+`D` (Mpc) and `z` are the recommended distance and redshift, `D_err` is the
+error on `D_input`, `logM` is log10 of the stellar mass, and `R1`/`R2`/`PA` are
+the ellipse semi-axes in arcseconds and its position angle in degrees. Dropped
+from the published 35 columns: `D_std`, `absgmag` and `match_offset`.
 
 ### The two Legacy Survey releases
 

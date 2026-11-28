@@ -84,6 +84,7 @@ pub enum Reader {
     FiveXmm,
     TwoSxps,
     FourFgl,
+    Regalade,
 }
 
 /// Where a catalog's files come from, which decides whether BOOM may delete
@@ -320,6 +321,17 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Gamma-ray sources from 14 years of Fermi-LAT, with 95% error ellipses, \
                       fluxes, variability and associations. One table, converted from FITS.",
         reader: Reader::FourFgl,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "regalade",
+        collection: "REGALADE_v2",
+        title: "REGALADE v2",
+        description: "71 million galaxies within 2000 Mpc with distances, redshifts, stellar \
+                      masses, sizes and optical/WISE magnitudes, for host identification. \
+                      One FITS table, fetched in slices of rows.",
+        reader: Reader::Regalade,
         source: Source::Fetched,
         aliases: &[],
     },
@@ -875,6 +887,7 @@ async fn ingest_file(
         Reader::FiveXmm => Ok(arrow::ingest_parquet::<types::FiveXmm>(inserter, path).await?),
         Reader::TwoSxps => Ok(arrow::ingest_parquet::<types::TwoSxps>(inserter, path).await?),
         Reader::FourFgl => Ok(arrow::ingest_parquet::<types::FourFgl>(inserter, path).await?),
+        Reader::Regalade => Ok(arrow::ingest_parquet::<types::Regalade>(inserter, path).await?),
     }
 }
 
