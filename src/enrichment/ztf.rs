@@ -1170,7 +1170,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let span = tracing::Span::current();
         let gp_span = span.clone();
         let gp_task = tokio::task::spawn_blocking(move || {
-            gp_span.in_scope(|| gp_fit::fit_many(&gp_inputs, &gp_config))
+            gp_span.in_scope(|| gp_fit::fit_many(&gp_inputs, &gp_config, gp_fit::ZTF_BANDS))
         });
         let fits_task = tokio::task::spawn_blocking(move || {
             span.in_scope(|| lightcurve_fits::fit_many(&fit_inputs))

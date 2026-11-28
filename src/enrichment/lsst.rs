@@ -9,6 +9,7 @@ use crate::enrichment::{
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+use crate::utils::gp_fit::{self, GpPoint};
 use crate::utils::host::{HostGalaxyAssociation, HostSummary};
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, moves_within_night, prepare_photometry, signed_snr,
@@ -86,6 +87,33 @@ impl LsstPhotometry {
         }
         self.to_photometry_mag(None)
     }
+
+    pub fn to_gp_point(&self) -> Option<GpPoint> {
+        let flux = self.flux?;
+        if self.magpsf.is_some() && flux < 0.0 {
+            return None;
+        }
+        Some(GpPoint {
+            jd: self.jd,
+            magpsf: self.magpsf.map(f64::from),
+            sigmapsf: self.sigmapsf.map(f64::from),
+            diffmaglim: f64::from(self.diffmaglim),
+            band: self.band.clone(),
+        })
+    }
+}
+
+fn gp_observations(
+    alert: &LsstAlertForEnrichment,
+    config: &rust_gp::GpConfig,
+) -> Vec<rust_gp::Obs> {
+    let points = alert
+        .prv_candidates
+        .iter()
+        .chain(&alert.fp_hists)
+        .filter(|p| p.jd <= alert.candidate.jd)
+        .filter_map(LsstPhotometry::to_gp_point);
+    gp_fit::observations(points, config)
 }
 
 pub fn lsst_detections(
@@ -434,6 +462,20 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
         let now = flare::Time::now().to_jd();
 
+        let gp_config = gp_fit::gp_config();
+        let gp_inputs: Vec<(i64, Vec<rust_gp::Obs>)> = alerts
+            .iter()
+            .map(|alert| (alert.candid, gp_observations(alert, &gp_config)))
+            .collect();
+        let span = tracing::Span::current();
+        let mut gp_fits = tokio::task::spawn_blocking(move || {
+            span.in_scope(|| gp_fit::fit_many(&gp_inputs, &gp_config, gp_fit::LSST_BANDS))
+        })
+        .await
+        .inspect_err(|e| warn!("GP fitting failed for the whole batch: {}", e))
+        .ok()
+        .map(Vec::into_iter);
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
@@ -448,12 +490,14 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let properties = self.get_alert_properties(&alert).await?;
 
-            let update_alert_document = doc! {
-                "$set": {
-                    "properties": mongify(&properties),
-                    "updated_at": now,
-                }
+            let mut set_doc = doc! {
+                "properties": mongify(&properties),
+                "updated_at": now,
             };
+            if let Some(fit) = gp_fits.as_mut().and_then(Iterator::next) {
+                set_doc.insert("gp_fit", fit);
+            }
+            let update_alert_document = doc! { "$set": set_doc };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()

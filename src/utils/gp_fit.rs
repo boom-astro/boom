@@ -107,12 +107,12 @@ fn detection_window(obs: &[Obs]) -> (f64, f64) {
         })
 }
 
-/// ZTF's bands, as only ZTF is fitted.
-const BANDS: [&str; 3] = ["g", "r", "i"];
+pub const ZTF_BANDS: &[&str] = &["g", "r", "i"];
+pub const LSST_BANDS: &[&str] = &["u", "g", "r", "i", "z", "y"];
 
-/// Fit with outlier clipping, then measure each band, as the document stored
-/// under `gp_fit`.
-pub fn fit(obs: &[Obs], config: &GpConfig) -> Result<Document, String> {
+/// Fit with outlier clipping, then measure each of `bands`, as the document
+/// stored under `gp_fit`.
+pub fn fit(obs: &[Obs], config: &GpConfig, bands: &[&str]) -> Result<Document, String> {
     let (first, last) = detection_window(obs);
     if last - first >= MAX_DETECTION_SPAN_DAYS {
         return Err(format!(
@@ -126,7 +126,7 @@ pub fn fit(obs: &[Obs], config: &GpConfig) -> Result<Document, String> {
         &fitted.result.hyper,
         &FeatureConfig::default(),
     );
-    Ok(to_document(&fitted.result.fit_quality, &features))
+    Ok(to_document(&fitted.result.fit_quality, &features, bands))
 }
 
 /// A stored field's name and where rust-gp keeps its value.
@@ -137,7 +137,7 @@ type Field = (&'static str, fn(&BandFeatures) -> Option<f64>);
 ///
 /// The reduced χ² is over the detections left after outlier clipping, with the
 /// GP's effective number of parameters taken off the degrees of freedom.
-fn to_document(quality: &FitQuality, features: &[BandFeatures]) -> Document {
+fn to_document(quality: &FitQuality, features: &[BandFeatures], bands: &[&str]) -> Document {
     let fields: [Field; 10] = [
         ("peak_jd", |f| f.peak_time),
         ("peak_jd_err", |f| f.peak_time_err),
@@ -150,7 +150,7 @@ fn to_document(quality: &FitQuality, features: &[BandFeatures]) -> Document {
         ("fade_rate", |f| f.fade_rate),
         ("fade_rate_err", |f| f.fade_rate_err),
     ];
-    let per_band: Vec<Option<&BandFeatures>> = BANDS
+    let per_band: Vec<Option<&BandFeatures>> = bands
         .iter()
         .map(|band| features.iter().find(|f| f.band == *band))
         .collect();
@@ -159,11 +159,11 @@ fn to_document(quality: &FitQuality, features: &[BandFeatures]) -> Document {
         "reduced_chi2": quality.reduced_chi2,
     };
     for (name, value) in fields {
-        for (band, f) in BANDS.iter().zip(&per_band) {
+        for (band, f) in bands.iter().zip(&per_band) {
             doc.insert(format!("{name}_{band}"), f.and_then(value));
         }
     }
-    for (band, f) in BANDS.iter().zip(&per_band) {
+    for (band, f) in bands.iter().zip(&per_band) {
         doc.insert(
             format!("n_detections_{band}"),
             f.map_or(0, |f| f.n_points as i32),
@@ -174,8 +174,8 @@ fn to_document(quality: &FitQuality, features: &[BandFeatures]) -> Document {
 
 /// Every key a fit writes, all null, so a light curve that was not fitted has
 /// the same schema as one that was.
-pub fn unfitted() -> Document {
-    to_document(&FitQuality::default(), &[])
+pub fn unfitted(bands: &[&str]) -> Document {
+    to_document(&FitQuality::default(), &[], bands)
         .into_iter()
         .map(|(key, _)| (key, Bson::Null))
         .collect()
@@ -185,20 +185,20 @@ pub fn unfitted() -> Document {
 /// source that is not fitted, which for most alerts means too few detections,
 /// gets [`unfitted`].
 #[instrument(skip_all, fields(sources = sources.len()))]
-pub fn fit_many(sources: &[(i64, Vec<Obs>)], config: &GpConfig) -> Vec<Document> {
+pub fn fit_many(sources: &[(i64, Vec<Obs>)], config: &GpConfig, bands: &[&str]) -> Vec<Document> {
     sources
         .par_iter()
         .map(|(candid, obs)| {
             // Caught here, or one bad light curve would lose the batch every fit.
-            match std::panic::catch_unwind(|| fit(obs, config)) {
+            match std::panic::catch_unwind(|| fit(obs, config, bands)) {
                 Ok(Ok(fit)) => fit,
                 Ok(Err(e)) => {
                     trace!(candid, "skipping GP fit: {}", e);
-                    unfitted()
+                    unfitted(bands)
                 }
                 Err(_) => {
                     warn!(candid, "GP fit panicked");
-                    unfitted()
+                    unfitted(bands)
                 }
             }
         })
@@ -314,7 +314,7 @@ mod tests {
         let config = gp_config();
         let obs = observations(bazin_points(), &config);
         assert!(obs.iter().any(|o| o.upper_limit), "pre-explosion limits");
-        let doc = fit(&obs, &config).expect("fittable");
+        let doc = fit(&obs, &config, ZTF_BANDS).expect("fittable");
         assert_eq!(
             doc.len(),
             34,
@@ -360,7 +360,7 @@ mod tests {
             (3, observations(bazin_points(), &config)),
         ];
 
-        let fits = fit_many(&sources, &config);
+        let fits = fit_many(&sources, &config, ZTF_BANDS);
         for not_fitted in &fits[..2] {
             assert!(
                 not_fitted.values().all(|v| *v == Bson::Null),

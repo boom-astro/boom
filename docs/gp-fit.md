@@ -1,6 +1,6 @@
 # Gaussian-process fits
 
-Every ZTF alert that BOOM enriches gets a multi-band Gaussian-process fit
+Every ZTF and LSST alert that BOOM enriches gets a multi-band Gaussian-process fit
 computed on the CPU with [`rust-gp`](https://github.com/frenbox/rust-gp), stored
 under `gp_fit`. The GP is non-parametric: rather than a model of the light
 curve, it measures the peak, its width and the rise and fade rates in each band.
@@ -10,8 +10,10 @@ fit was added have no `gp_fit`.
 
 ## Input
 
-The alert's own ZTF photometry up to its epoch: detections, forced photometry
-and non-detections. A matched LSST object's photometry is left out.
+The alert's own photometry up to its epoch: detections, forced photometry
+and non-detections. The photometry of a matched object from the other survey is
+left out. For LSST, a forced measurement below the detection threshold counts as
+a non-detection.
 
 - A detection below the reference (negative flux) is dropped.
 - A detection on an image shallower than 19 mag is dropped, and magnitude
@@ -25,8 +27,8 @@ redone, as long as at least 5 detections remain.
 
 ## Stored fields
 
-`gp_fit` is flat, one key per field and band, for `g`, `r` and `i`
-(`peak_mag_r`):
+`gp_fit` is flat, one key per field and band (`peak_mag_r`), for `g`, `r` and
+`i` on ZTF and `u`, `g`, `r`, `i`, `z` and `y` on LSST:
 
 | Field | Meaning | Unit |
 | --- | --- | --- |
